@@ -1,0 +1,279 @@
+// Tests: toml-test (tests/valid.txt, tests/invalid.txt), round trips,
+// errors, typed decode / encode.
+
+use rok::std::fs;
+use pkg::{Value, Datetime, Date, Time};
+use pkg::toml;
+
+fn expect(ok: bool, what: str) {
+    if !ok { panic(f"check failed: {what}"); }
+}
+
+fn hex_bytes(h: str) -> List<u8> {
+    let out: List<u8> = List::with_capacity(h.len() / 2);
+    let i = 0usize;
+    while i + 1 < h.len() {
+        let n = Int::parse_radix(h[i:i + 2], 16u32) ?? Int::from(0);
+        out.push((n.to_i64() ?? 0) as u8);
+        i += 2;
+    }
+    out
+}
+
+/// (name, document bytes, expected canonical value or "") of a case file.
+fn cases(file: str) -> List<(str, List<u8>, str)> {
+    let text = try fs::read_to_str(file) catch e { panic(f"{e}"); };
+    let out: List<(str, List<u8>, str)> = List::new();
+    for line in text.lines() {
+        if line.starts_with("#") || line.is_empty() { continue; }
+        let (name, rest) = line.split_once(" ") ?? (line, "");
+        let (h, want) = rest.split_once(" ") ?? (rest, "");
+        out.push((name, hex_bytes(h), want));
+    }
+    out
+}
+
+fn parse_bytes(b: List<u8>) throws (pkg::TomlError) -> Value {
+    let s = try str::from_utf8(b) catch _ { throw pkg::TomlError::new("invalid UTF-8"); };
+    try pkg::parse(s)
+}
+
+/// `s` quoted as toml-test's expected values are (see the vendoring
+/// header): `"`, `\` and control characters escaped.
+fn jstr(s: str) -> str {
+    let out = StrBuf::new();
+    out.push('"');
+    for c in s.chars() {
+        let n = c as u32;
+        if c == '"' {
+            out.push_str("\\\"");
+        } else if c == '\\' {
+            out.push_str("\\\\");
+        } else if n < 0x20u32 || n == 0x7Fu32 {
+            out.push_str(f"\\u{n:04x}");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('"');
+    out.to_str()
+}
+
+fn float_canon(x: f64) -> str {
+    if x.is_nan() { return "nan"; }
+    if !x.is_finite() { return if x < 0.0 { "-inf" } else { "inf" }; }
+    f"{x:e}"
+}
+
+/// `v` in the canonical form of the expected values: tables with keys
+/// sorted, scalars as `type:value`.
+fn canon(v: Value) -> str {
+    match v {
+        Value::Str(s) => "string:" + jstr(s),
+        Value::Int(n) => f"integer:{n}",
+        Value::Float(x) => "float:" + float_canon(x),
+        Value::Bool(b) => if b { "bool:true" } else { "bool:false" },
+        Value::Datetime(d) => f"{d.kind()}:{d}",
+        Value::Array(xs) => {
+            let parts: List<str> = List::new();
+            for x in xs { parts.push(canon(x)); }
+            "[" + parts.join(",") + "]"
+        },
+        Value::Table(t) => {
+            let keys: List<str> = List::new();
+            for k in t.keys() { keys.push(k); }
+            keys.sort();
+            let parts: List<str> = List::new();
+            for k in keys { parts.push(jstr(k) + ":" + canon(t[k])); }
+            "{" + parts.join(",") + "}"
+        },
+    }
+}
+
+#[test]
+fn toml_test_valid() {
+    let ok = 0;
+    let bad: List<str> = List::new();
+    for (name, b, want) in cases("tests/valid.txt") {
+        let v = try parse_bytes(b) catch e {
+            bad.push(f"{name}: {e}");
+            continue;
+        };
+        let got = canon(v);
+        if got != want {
+            bad.push(f"{name}: got {got}");
+            continue;
+        }
+        // The writer's text reads back as the same value.
+        let text = v.to_string();
+        let back = try pkg::parse(text) catch e {
+            bad.push(f"{name}: written form does not read back ({e}):\n{text}");
+            continue;
+        };
+        if canon(back) != want {
+            bad.push(f"{name}: written form reads back differently:\n{text}");
+            continue;
+        }
+        ok += 1;
+    }
+    println(f"valid: {ok} passed");
+    expect(bad.is_empty(), "\n" + bad.join("\n"));
+}
+
+#[test]
+fn toml_test_invalid() {
+    let ok = 0;
+    let bad: List<str> = List::new();
+    for (name, b, _) in cases("tests/invalid.txt") {
+        try parse_bytes(b) catch _ {
+            ok += 1;
+            continue;
+        };
+        bad.push(name);
+    }
+    println(f"invalid: {ok} rejected");
+    expect(bad.is_empty(), "accepted: " + bad.join(", "));
+}
+
+fn err_of(s: str) -> str {
+    try pkg::parse(s) catch e { return f"{e}"; };
+    "ok"
+}
+
+#[test]
+fn errors() {
+    let cases: List<(str, str)> = [
+        ("a = 1\na = 2", "2:1: key `a` is defined twice"),
+        ("[t]\nx = 1\n[t]", "3:2: table `t` is defined twice"),
+        ("a = { b = 1 }\n[a.c]", "2:2: inline table `a` cannot be extended"),
+        ("x = \"abc", "1:5: unterminated string"),
+        ("x = 1979-13-01", "1:5: malformed date / time"),
+        ("x = 01", "1:5: leading zeros are not allowed"),
+        ("x = 9223372036854775808", "1:5: integer out of range (64 bits)"),
+        ("x = [1, 2", "1:10: expected `,` or `]`, found the end of the document"),
+        ("é = 1", "1:1: expected a key, found 'é'"),
+        ("x = 1 y = 2", "1:7: expected a newline, found 'y'"),
+    ];
+    for (src, want) in cases {
+        let got = err_of(src);
+        expect(got == want, f"{src:?}: {got}");
+    }
+}
+
+#[test]
+fn datetimes() {
+    let v = try pkg::parse("a = 1979-05-27T07:32:00.999999-07:00\nb = 1979-05-27 07:32:00\nc = 1979-05-27\nd = 00:32:00.5")
+        catch e { panic(f"{e}"); };
+    let a = v.get("a")?.as_datetime() ?? panic("a");
+    expect(a.date == Date { year: 1979u16, month: 5u8, day: 27u8 }, "date");
+    expect(a.time == Time { hour: 7u8, minute: 32u8, second: 0u8, nanosecond: 999999000u32 }, "time");
+    expect(a.offset == -420i16, "offset");
+    expect(f"{a}" == "1979-05-27T07:32:00.999999-07:00", f"{a}");
+    let kinds: List<str> = [];
+    for k in ["a", "b", "c", "d"] { kinds.push((v.get(k)?.as_datetime() ?? panic(k)).kind()); }
+    expect(kinds == ["datetime", "datetime-local", "date-local", "time-local"], f"{kinds:?}");
+    expect(Datetime::parse("2000-02-29") is Datetime, "leap day");
+    expect(Datetime::parse("2001-02-29") is none, "not a leap year");
+    expect(Datetime::parse("1979-05-27T25:00:00") is none, "hour");
+}
+
+#[test]
+fn layout() {
+    let src = "title = \"x\"\n\n[owner]\nname = \"Tom\"\n\n[db.ports]\nhttp = 80\n\n[[products]]\nname = \"a\"\n\n[[products]]\nname = \"b\"\nsku = [1, 2]\n\n[products.meta]\nok = true\n";
+    let v = try pkg::parse(src) catch e { panic(f"{e}"); };
+    expect(v.to_string() == src, v.to_string());
+    let long = "xs = [\n    \"" + "a".repeat(60) + "\",\n    \"" + "b".repeat(60) + "\",\n]\n";
+    let v2 = try pkg::parse(long) catch e { panic(f"{e}"); };
+    expect(v2.to_string() == long, v2.to_string());
+    let odd = try pkg::parse("\"a b\" = { c = [1.0, inf, -0.0], \"d.e\" = 'q\"' }") catch e { panic(f"{e}"); };
+    expect(odd.to_string() == "[\"a b\"]\nc = [1.0, inf, -0.0]\n\"d.e\" = \"q\\\"\"\n", odd.to_string());
+}
+
+// ---- typed ----
+
+#[derive(Toml, Clone, PartialEq, Debug)]
+struct Server {
+    host: str;
+    port: u16 = 80;
+    tls: bool | none;
+}
+
+#[derive(Toml, Clone, PartialEq, Debug)]
+enum Mode {
+    Fast,
+    Limit(u32),
+    Range(i32, i32),
+    Custom { level: i32; name: str | none; },
+}
+
+#[derive(Toml, Clone, PartialEq, Debug)]
+struct Config {
+    name: str;
+    started: Datetime;
+    day: Date;
+    servers: List<Server>;
+    limits: OrderedDict<str, i64>;
+    modes: List<Mode>;
+    ids: Dict<u32, str>;
+    ratio: f32;
+}
+
+fn config_text() -> str {
+    "name = \"geom\"
+started = 2024-01-02T03:04:05Z
+day = 2024-01-02
+ratio = 0.1
+modes = [\"Fast\", { Limit = 3 }, { Range = [1, 2] }, { Custom = { level = 7 } }]
+
+[limits]
+cpu = 2
+mem = 512
+
+[ids]
+7 = \"seven\"
+
+[[servers]]
+host = \"a\"
+port = 8080
+tls = true
+
+[[servers]]
+host = \"b\"
+"
+}
+
+#[test]
+fn typed_round_trip() {
+    let c: Config = try pkg::from_str(config_text()) catch e { panic(f"{e}"); };
+    expect(c.servers[0] == Server { host: "a", port: 8080u16, tls: true }, "server 0");
+    expect(c.servers[1] == Server { host: "b", port: 80u16, tls: none }, "defaults");
+    expect(c.modes == [Mode::Fast, Mode::Limit(3u32), Mode::Range(1, 2), Mode::Custom { level: 7, name: none }], f"{c.modes:?}");
+    expect(c.ids[7u32] == "seven", "int keys");
+    expect(c.ratio == 0.1f32, "f32");
+    expect(f"{c.started}" == "2024-01-02T03:04:05Z", "datetime");
+    let text = pkg::to_string(c);
+    let back: Config = try pkg::from_str(text) catch e { panic(f"{e}:\n{text}"); };
+    expect(back == c, "round trip");
+    expect(text.contains("ratio = 0.1\n"), text);
+    expect(text.contains("[[servers]]\nhost = \"b\"\nport = 80\n"), text);
+}
+
+fn typed_err(s: str) -> str {
+    try pkg::from_str::<Config>(s) catch e { return f"{e} [{e.path}]"; };
+    "ok"
+}
+
+#[test]
+fn typed_errors() {
+    let base = config_text();
+    let e1 = typed_err(base.replace("port = 8080", "port = 70000"));
+    expect(e1 == "16:8: integer 70000 is out of range for u16 [.servers[0].port]", e1);
+    let e2 = typed_err(base.replace("host = \"b\"", "host = \"b\"\nhots = 1"));
+    expect(e2 == "21:1: unknown field `hots` in Server [.servers[1].hots]", e2);
+    let e3 = typed_err(base.replace("{ Range = [1, 2] }", "{ Range = [1] }"));
+    expect(e3 == "5:43: Mode::Range takes 2 values, found 1 [.modes[2].Range]", e3);
+    let e4 = typed_err(base.replace("day = 2024-01-02", "day = 03:04:05"));
+    expect(e4 == "3:7: expected a local date, found time-local [.day]", e4);
+    let e5 = typed_err(base.replace("[limits]", "[limitz]"));
+    expect(e5 == "7:1: unknown field `limitz` in Config [.limitz]", e5);
+}

@@ -1,0 +1,159 @@
+// TOML date / time values (RFC 3339, with TOML's local forms).
+
+/// A calendar date.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Date {
+    pub year: u16;
+    pub month: u8;
+    pub day: u8;
+}
+
+/// A time of day. TOML keeps fractions to the nanosecond; more digits
+/// are truncated.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Time {
+    pub hour: u8;
+    pub minute: u8;
+    pub second: u8;
+    pub nanosecond: u32;
+}
+
+/// One of TOML's four date-time forms, by which parts are present:
+/// offset date-time (all three), local date-time (`date` + `time`),
+/// local date (`date`), local time (`time`). `offset` is minutes east of
+/// UTC (`Z` is 0) and only comes with both `date` and `time`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Datetime {
+    pub date: Date | none;
+    pub time: Time | none;
+    pub offset: i16 | none;
+}
+
+impl Datetime {
+    /// The form's name, as toml-test spells it: `datetime`,
+    /// `datetime-local`, `date-local` or `time-local`.
+    pub fn kind(self) -> str {
+        if self.offset is i16 { return "datetime"; }
+        if self.date is Date && self.time is Time { return "datetime-local"; }
+        if self.date is Date { "date-local" } else { "time-local" }
+    }
+
+    /// Read a TOML date-time (`1979-05-27T07:32:00Z`, `1979-05-27 07:32:00`,
+    /// `1979-05-27`, `07:32:00.999`).
+    pub fn parse(s: str) -> Datetime | none {
+        let (d, n) = scan(s, 0)?;
+        if n != s.len() { return none; }
+        d
+    }
+}
+
+impl Display for Datetime {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        let out = StrBuf::new();
+        if let d: Date = self.date {
+            out.push_str(f"{d.year:04}-{d.month:02}-{d.day:02}");
+            if self.time is Time { out.push('T'); }
+        }
+        if let t: Time = self.time {
+            out.push_str(f"{t.hour:02}:{t.minute:02}:{t.second:02}");
+            if t.nanosecond > 0u32 {
+                let frac = f"{t.nanosecond:09}";
+                while frac.ends_with("0") { frac = frac[:frac.len() - 1]; }
+                out.push('.');
+                out.push_str(frac);
+            }
+        }
+        if let m: i16 = self.offset {
+            if m == 0i16 {
+                out.push('Z');
+            } else {
+                let a = if m < 0i16 { -m } else { m };
+                let sign = if m < 0i16 { "-" } else { "+" };
+                out.push_str(f"{sign}{a / 60i16:02}:{a % 60i16:02}");
+            }
+        }
+        try f.write_str(out.to_str())
+    }
+}
+
+fn digits(s: str, at: usize, n: usize) -> u32 | none {
+    if at + n > s.len() { return none; }
+    let v = 0u32;
+    for k in at..at + n {
+        let b = s.byte(k);
+        if b < 0x30u8 || b > 0x39u8 { return none; }
+        v = v * 10u32 + (b - 0x30u8) as u32;
+    }
+    v
+}
+
+fn byte_at(s: str, at: usize) -> u8 {
+    if at < s.len() { s.byte(at) } else { 0u8 }
+}
+
+fn is_leap(y: u32) -> bool { (y % 4u32 == 0u32 && y % 100u32 != 0u32) || y % 400u32 == 0u32 }
+
+fn days_in(y: u32, m: u32) -> u32 {
+    if m == 2u32 { return if is_leap(y) { 29u32 } else { 28u32 }; }
+    if m == 4u32 || m == 6u32 || m == 9u32 || m == 11u32 { 30u32 } else { 31u32 }
+}
+
+/// A date-time at `at` of `s`: the value and the index after it, or
+/// `none` when the text there is not a valid date-time.
+pub fn scan(s: str, at: usize) -> (Datetime, usize) | none {
+    let i = at;
+    let date: Date | none = none;
+    if byte_at(s, i + 4) == 0x2Du8 {
+        let y = digits(s, i, 4)?;
+        if byte_at(s, i + 7) != 0x2Du8 { return none; }
+        let m = digits(s, i + 5, 2)?;
+        let d = digits(s, i + 8, 2)?;
+        if m < 1u32 || m > 12u32 || d < 1u32 || d > days_in(y, m) { return none; }
+        date = Date { year: y as u16, month: m as u8, day: d as u8 };
+        i += 10;
+        // `T`, `t` or a space, then a time; a space alone ends the date.
+        let sep = byte_at(s, i);
+        let time_next = digits(s, i + 1, 2) is u32 && byte_at(s, i + 3) == 0x3Au8;
+        if (sep == 0x54u8 || sep == 0x74u8) && !time_next { return none; }
+        if !((sep == 0x54u8 || sep == 0x74u8 || sep == 0x20u8) && time_next) {
+            return (Datetime { date: date, time: none, offset: none }, i);
+        }
+        i += 1;
+    }
+    let h = digits(s, i, 2)?;
+    if byte_at(s, i + 2) != 0x3Au8 || byte_at(s, i + 5) != 0x3Au8 { return none; }
+    let mi = digits(s, i + 3, 2)?;
+    let se = digits(s, i + 6, 2)?;
+    if h > 23u32 || mi > 59u32 || se > 60u32 { return none; }
+    i += 8;
+    let nano = 0u32;
+    if byte_at(s, i) == 0x2Eu8 {
+        i += 1;
+        let start = i;
+        let scale = 100000000u32;
+        while i < s.len() && s.byte(i) >= 0x30u8 && s.byte(i) <= 0x39u8 {
+            nano += (s.byte(i) - 0x30u8) as u32 * scale;
+            scale /= 10u32;
+            i += 1;
+        }
+        if i == start { return none; }
+    }
+    let time = Time { hour: h as u8, minute: mi as u8, second: se as u8, nanosecond: nano };
+    let off: i16 | none = none;
+    let b = byte_at(s, i);
+    if date is Date {
+        if b == 0x5Au8 || b == 0x7Au8 {
+            off = 0i16;
+            i += 1;
+        } else if b == 0x2Bu8 || b == 0x2Du8 {
+            let oh = digits(s, i + 1, 2)?;
+            if byte_at(s, i + 3) != 0x3Au8 { return none; }
+            let om = digits(s, i + 4, 2)?;
+            if oh > 23u32 || om > 59u32 { return none; }
+            let m = (oh * 60u32 + om) as i16;
+            off = if b == 0x2Du8 { -m } else { m };
+            i += 6;
+        }
+    }
+    (Datetime { date: date, time: time, offset: off }, i)
+}

@@ -1,0 +1,162 @@
+// TOML text of a table: plain keys first, then `[table]` sections and
+// `[[array]]` elements, each table under its full dotted header.
+
+use pkg::Value;
+
+const WIDTH: usize = 100;
+
+/// `t` as a document.
+pub fn document(t: OrderedDict<str, Value>) -> str {
+    let out = StrBuf::new();
+    table(out, t, "");
+    out.to_str()
+}
+
+/// An array written as `[[header]]` sections: non-empty, all tables.
+fn is_aot(v: Value) -> bool {
+    match v {
+        Value::Array(xs) => !xs.is_empty() && xs.iter().all(|x| is_table(x)),
+        _ => false,
+    }
+}
+
+fn is_table(v: Value) -> bool {
+    match v {
+        Value::Table(_) => true,
+        _ => false,
+    }
+}
+
+/// A table written as its own section (not a plain `key = value`).
+fn is_section(v: Value) -> bool { is_table(v) || is_aot(v) }
+
+/// `t`'s plain keys, then its sections under `prefix` (`a.b`, or empty
+/// at the root).
+fn table(out: StrBuf, t: OrderedDict<str, Value>, prefix: str) {
+    for (k, v) in t.entries() {
+        if is_section(v) { continue; }
+        let key = key_text(k);
+        out.push_str(key + " = " + pretty(v, key.char_count() + 3) + "\n");
+    }
+    for (k, v) in t.entries() {
+        let name = if prefix.is_empty() { key_text(k) } else { prefix + "." + key_text(k) };
+        match v {
+            Value::Table(sub) => {
+                // A table holding only tables needs no header of its own.
+                if sub.is_empty() || sub.values().any(|x| !is_section(x)) {
+                    section(out, "[" + name + "]");
+                }
+                table(out, sub, name);
+            },
+            Value::Array(xs) => {
+                if !is_aot(v) { continue; }
+                for x in xs {
+                    section(out, "[[" + name + "]]");
+                    if let Value::Table(sub) = x { table(out, sub, name); }
+                }
+            },
+            _ => {},
+        }
+    }
+}
+
+fn section(out: StrBuf, header: str) {
+    if out.len() > 0 { out.push('\n'); }
+    out.push_str(header + "\n");
+}
+
+/// `v` starting at column `col`: one line if it fits, else (an array)
+/// one item per line.
+fn pretty(v: Value, col: usize) -> str {
+    let one = inline(v);
+    if col + one.char_count() <= WIDTH { return one; }
+    match v {
+        Value::Array(xs) => {
+            let b = StrBuf::new();
+            b.push_str("[\n");
+            for x in xs { b.push_str("    " + inline(x) + ",\n"); }
+            b.push_str("]");
+            b.to_str()
+        },
+        _ => one,
+    }
+}
+
+/// `v` on one line (`{ k = v }` for a table).
+pub fn inline(v: Value) -> str {
+    match v {
+        Value::Str(s) => quoted(s),
+        Value::Int(n) => f"{n}",
+        Value::Float(x) => float_text(x),
+        Value::Bool(b) => if b { "true" } else { "false" },
+        Value::Datetime(d) => f"{d}",
+        Value::Array(xs) => {
+            let parts: List<str> = List::new();
+            for x in xs { parts.push(inline(x)); }
+            "[" + parts.join(", ") + "]"
+        },
+        Value::Table(t) => {
+            if t.is_empty() { return "{}"; }
+            let parts: List<str> = List::new();
+            for (k, x) in t.entries() { parts.push(key_text(k) + " = " + inline(x)); }
+            "{ " + parts.join(", ") + " }"
+        },
+    }
+}
+
+/// A key: bare (`A-Za-z0-9_-`) when it can be, else quoted.
+pub fn key_text(k: str) -> str { if is_bare(k) { k } else { quoted(k) } }
+
+pub fn is_bare(k: str) -> bool {
+    if k.is_empty() { return false; }
+    for b in k.bytes() {
+        let ok = (b >= 0x61u8 && b <= 0x7Au8) || (b >= 0x41u8 && b <= 0x5Au8) || (b >= 0x30u8 && b <= 0x39u8)
+            || b == 0x5Fu8 || b == 0x2Du8;
+        if !ok { return false; }
+    }
+    true
+}
+
+/// `s` as a basic string: `"`, `\` and control characters escaped.
+pub fn quoted(s: str) -> str {
+    let out = StrBuf::new();
+    out.push('"');
+    let from = 0usize;
+    for i in 0..s.len() {
+        let b = s.byte(i);
+        if b >= 0x20u8 && b != 0x22u8 && b != 0x5Cu8 && b != 0x7Fu8 { continue; }
+        out.push_str(s[from:i]);
+        from = i + 1;
+        if b == 0x22u8 {
+            out.push_str("\\\"");
+        } else if b == 0x5Cu8 {
+            out.push_str("\\\\");
+        } else if b == 0x0Au8 {
+            out.push_str("\\n");
+        } else if b == 0x09u8 {
+            out.push_str("\\t");
+        } else if b == 0x0Du8 {
+            out.push_str("\\r");
+        } else if b == 0x08u8 {
+            out.push_str("\\b");
+        } else if b == 0x0Cu8 {
+            out.push_str("\\f");
+        } else {
+            let h = b as u32;
+            out.push_str(f"\\u{h:04X}");
+        }
+    }
+    out.push_str(s[from:]);
+    out.push('"');
+    out.to_str()
+}
+
+/// The shortest digits that read back as `x`, with a `.0` or an
+/// exponent so it reads back as a float; `inf`, `-inf`, `nan`.
+pub fn float_text(x: f64) -> str {
+    if x.is_nan() { return "nan"; }
+    if !x.is_finite() { return if x < 0.0 { "-inf" } else { "inf" }; }
+    let a = x.abs();
+    let t = if a != 0.0 && (a < 1e-6 || a >= 1e21) { f"{x:e}" } else { f"{x}" };
+    if t.contains(".") || t.contains("e") { t } else { t + ".0" }
+}

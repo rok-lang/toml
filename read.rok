@@ -1,0 +1,708 @@
+// TOML 1.0.0 reader: a recursive descent over the bytes of the
+// document that builds the table tree as it goes, with each table's
+// origin kept by path so redefinitions are caught.
+
+use pkg::{Value, TomlError};
+use pkg::datetime;
+
+// How a table (or array) came to be; tables made inside inline values
+// are not tracked (nothing can reach them).
+const K_IMPLICIT: i32 = 1;  // a parent named by a `[a.b]` header
+const K_DEFINED: i32 = 2;   // a `[header]`, or an `[[array]]` element
+const K_DOTTED: i32 = 3;    // made by a dotted key
+const K_INLINE: i32 = 4;    // an inline table `{ .. }`
+const K_AOT: i32 = 5;       // an array of tables
+
+struct Parser {
+    s: str;
+    i: usize;
+    /// Kind of each table / array of tables by path id (`id`).
+    meta: Dict<str, i32>;
+    root: OrderedDict<str, Value>;
+    /// The table the current section writes to, its id and display path.
+    cur: OrderedDict<str, Value>;
+    cur_id: str;
+    cur_path: str;
+    /// `locate` mode: where the value / key at display path `want` starts
+    /// (byte index + 1; 0 = not seen).
+    locating: bool;
+    want: str;
+    hit_val: usize;
+    hit_key: usize;
+}
+
+/// The path-id segment of key `k`: length-prefixed, so ids never collide.
+fn enc(k: str) -> str { f"{k.len()}:{k}" }
+
+/// The display segment of key `k`: `.k`, or `."k"` unless `k` is bare.
+pub fn seg(k: str) -> str {
+    if pkg::write::is_bare(k) { "." + k } else { "." + pkg::write::quoted(k) }
+}
+
+/// Read one document.
+pub fn parse(s: str) throws (TomlError) -> OrderedDict<str, Value> {
+    let p = parser(s, false, "");
+    try p.document();
+    p.root
+}
+
+fn parser(s: str, locating: bool, want: str) -> Parser {
+    let root: OrderedDict<str, Value> = OrderedDict::new();
+    Parser {
+        s: s, i: 0, meta: Dict::new(), root: root, cur: root, cur_id: "", cur_path: "",
+        locating: locating, want: want, hit_val: 0, hit_key: 0,
+    }
+}
+
+/// `e` (from decoding `s`'s value) with the `line:col` of `e.path`.
+pub fn locate(s: str, e: TomlError) -> TomlError {
+    let p = parser(s, true, e.path);
+    try p.document() catch _ { return e; };
+    let hit = if e.on_key && p.hit_key > 0 { p.hit_key } else { p.hit_val };
+    if hit == 0 { return e; }
+    let r = fail_at(s, hit - 1, e.msg);
+    r.path = e.path;
+    r.on_key = e.on_key;
+    r
+}
+
+/// `msg` at byte `at` of `s`, with its line / column (1-based, code points).
+fn fail_at(s: str, at: usize, msg: str) -> TomlError {
+    let line = 1u32;
+    let col = 1u32;
+    let end = at.min(s.len());
+    for j in 0..end {
+        let b = s.byte(j);
+        if b == 0x0Au8 {
+            line += 1u32;
+            col = 1u32;
+        } else if (b & 0xC0u8) != 0x80u8 && b != 0x0Du8 {
+            col += 1u32;
+        }
+    }
+    let e = TomlError::new(msg);
+    e.line = line;
+    e.col = col;
+    e
+}
+
+fn is_bare_byte(b: u8) -> bool {
+    (b >= 0x61u8 && b <= 0x7Au8) || (b >= 0x41u8 && b <= 0x5Au8) || (b >= 0x30u8 && b <= 0x39u8)
+        || b == 0x5Fu8 || b == 0x2Du8
+}
+
+fn is_digit(b: u8) -> bool { b >= 0x30u8 && b <= 0x39u8 }
+
+/// A control character TOML does not allow in comments and strings.
+fn is_control(b: u8) -> bool { (b < 0x20u8 && b != 0x09u8) || b == 0x7Fu8 }
+
+impl Parser {
+    fn fail(self, at: usize, msg: str) -> TomlError { fail_at(self.s, at, msg) }
+
+    fn peek(self) -> u8 { if self.i < self.s.len() { self.s.byte(self.i) } else { 0u8 } }
+
+    fn peek_at(self, k: usize) -> u8 { if k < self.s.len() { self.s.byte(k) } else { 0u8 } }
+
+    fn eof(self) -> bool { self.i >= self.s.len() }
+
+    fn starts(self, t: str) -> bool { self.s[self.i:].starts_with(t) }
+
+    /// "expected `what`, found ..." at the current position.
+    fn found(self, what: str) -> TomlError {
+        if self.eof() { return self.fail(self.i, f"expected {what}, found the end of the document"); }
+        let c = self.s[self.i:].chars().next() ?? ' ';
+        self.fail(self.i, f"expected {what}, found {c:?}")
+    }
+
+    fn ws(ref self) {
+        while self.peek() == 0x20u8 || self.peek() == 0x09u8 { self.i += 1; }
+    }
+
+    /// A `#` comment, if there is one, up to (not including) the newline.
+    fn comment(ref self) throws (TomlError) {
+        if self.peek() != 0x23u8 { return; }
+        self.i += 1;
+        while !self.eof() {
+            let b = self.peek();
+            if b == 0x0Au8 || (b == 0x0Du8 && self.peek_at(self.i + 1) == 0x0Au8) { return; }
+            if is_control(b) { throw self.fail(self.i, "control character in comment"); }
+            self.i += 1;
+        }
+    }
+
+    /// A newline (`\n` or `\r\n`) if there is one.
+    fn newline(ref self) -> bool {
+        if self.peek() == 0x0Au8 {
+            self.i += 1;
+            return true;
+        }
+        if self.peek() == 0x0Du8 && self.peek_at(self.i + 1) == 0x0Au8 {
+            self.i += 2;
+            return true;
+        }
+        false
+    }
+
+    /// The end of a line: whitespace, a comment, then a newline or the end.
+    fn line_end(ref self) throws (TomlError) {
+        self.ws();
+        try self.comment();
+        if !self.newline() && !self.eof() { throw self.found("a newline"); }
+    }
+
+    fn document(ref self) throws (TomlError) {
+        if self.starts("\u{feff}") { self.i += 3; }
+        loop {
+            self.ws();
+            if self.eof() { break; }
+            let b = self.peek();
+            if b == 0x23u8 {
+                try self.comment();
+            } else if b == 0x0Au8 || b == 0x0Du8 {
+                if !self.newline() { throw self.fail(self.i, "a carriage return must be followed by a newline"); }
+                continue;
+            } else if b == 0x5Bu8 {
+                try self.header();
+            } else {
+                let t = self.cur;
+                let id = self.cur_id;
+                let path = self.cur_path;
+                let m = self.meta;
+                try self.keyval(t, id, path, m);
+            }
+            try self.line_end();
+        }
+    }
+
+    // ---- keys ----
+
+    /// A dotted key: (segments, start index of each).
+    fn key(ref self) throws (TomlError) -> (List<str>, List<usize>) {
+        let keys: List<str> = List::new();
+        let at: List<usize> = List::new();
+        loop {
+            self.ws();
+            at.push(self.i);
+            keys.push(try self.simple_key());
+            self.ws();
+            if self.peek() != 0x2Eu8 { break; }
+            self.i += 1;
+        }
+        (keys, at)
+    }
+
+    fn simple_key(ref self) throws (TomlError) -> str {
+        let b = self.peek();
+        if b == 0x22u8 {
+            if self.starts("\"\"\"") { throw self.fail(self.i, "a multi-line string cannot be a key"); }
+            return try self.basic_string();
+        }
+        if b == 0x27u8 {
+            if self.starts("'''") { throw self.fail(self.i, "a multi-line string cannot be a key"); }
+            return try self.literal_string();
+        }
+        let start = self.i;
+        while is_bare_byte(self.peek()) { self.i += 1; }
+        if self.i == start { throw self.found("a key"); }
+        self.s[start:self.i]
+    }
+
+    /// `key = value` into `table` (path id `id`, display path `path`).
+    fn keyval(ref self, table: OrderedDict<str, Value>, id: str, path: str, meta: Dict<str, i32>) throws (TomlError) {
+        let (keys, at) = try self.key();
+        if self.peek() != 0x3Du8 { throw self.found("`=` after a key"); }
+        self.i += 1;
+        self.ws();
+        let full = path;
+        if self.locating {
+            for k in keys { full += seg(k); }
+            if full == self.want && self.hit_key == 0 { self.hit_key = at[at.len() - 1] + 1; }
+        }
+        let vat = self.i;
+        let v = try self.value(full);
+        // Walk / make the dotted parents.
+        let t = table;
+        let tid = id;
+        let n = keys.len();
+        for j in 0..n - 1 {
+            let k = keys[j];
+            let kid = tid + enc(k);
+            match t.get(k) {
+                none => {
+                    let sub: OrderedDict<str, Value> = OrderedDict::new();
+                    t.insert(k, Value::Table(sub));
+                    meta.insert(kid, K_DOTTED);
+                    t = sub;
+                },
+                x: Value => match x {
+                    Value::Table(sub) => {
+                        if (meta.get(kid) ?? 0) != K_DOTTED {
+                            throw self.fail(at[j], f"table `{k}` is already defined; a dotted key cannot add to it");
+                        }
+                        t = sub;
+                    },
+                    _ => throw self.fail(at[j], f"key `{k}` already holds a value"),
+                },
+            }
+            tid = kid;
+        }
+        let last = keys[n - 1];
+        if t.contains_key(last) { throw self.fail(at[n - 1], f"key `{last}` is defined twice"); }
+        t.insert(last, v);
+        if self.peek_at(vat) == 0x7Bu8 { meta.insert(tid + enc(last), K_INLINE); }
+    }
+
+    // ---- headers ----
+
+    /// `[a.b]` or `[[a.b]]`.
+    fn header(ref self) throws (TomlError) {
+        let open = self.i;
+        let aot = self.starts("[[");
+        self.i += if aot { 2 } else { 1 };
+        let (keys, at) = try self.key();
+        if aot {
+            if !self.starts("]]") { throw self.found("`]]`"); }
+            self.i += 2;
+        } else {
+            if self.peek() != 0x5Du8 { throw self.found("`]`"); }
+            self.i += 1;
+        }
+        let t = self.root;
+        let tid = "";
+        let path = "";
+        let n = keys.len();
+        for j in 0..n - 1 {
+            let k = keys[j];
+            let kid = tid + enc(k);
+            path += seg(k);
+            match t.get(k) {
+                none => {
+                    let sub: OrderedDict<str, Value> = OrderedDict::new();
+                    t.insert(k, Value::Table(sub));
+                    self.meta.insert(kid, K_IMPLICIT);
+                    t = sub;
+                    tid = kid;
+                },
+                x: Value => match x {
+                    Value::Table(sub) => {
+                        if (self.meta.get(kid) ?? 0) == K_INLINE {
+                            throw self.fail(at[j], f"inline table `{k}` cannot be extended");
+                        }
+                        t = sub;
+                        tid = kid;
+                    },
+                    Value::Array(xs) => {
+                        if (self.meta.get(kid) ?? 0) != K_AOT {
+                            throw self.fail(at[j], f"array `{k}` is not an array of tables");
+                        }
+                        let last = xs.len() - 1;
+                        path += f"[{last}]";
+                        tid = kid + f"#{last}";
+                        t = match xs[last] {
+                            Value::Table(sub) => sub,
+                            _ => throw self.fail(at[j], f"array `{k}` is not an array of tables"),
+                        };
+                    },
+                    _ => throw self.fail(at[j], f"key `{k}` already holds a value"),
+                },
+            }
+        }
+        let k = keys[n - 1];
+        let kid = tid + enc(k);
+        path += seg(k);
+        let table: OrderedDict<str, Value> = OrderedDict::new();
+        if aot {
+            match t.get(k) {
+                none => {
+                    t.insert(k, Value::Array([Value::Table(table)]));
+                    self.meta.insert(kid, K_AOT);
+                    tid = kid + "#0";
+                    path += "[0]";
+                },
+                x: Value => match x {
+                    Value::Array(xs) => {
+                        if (self.meta.get(kid) ?? 0) != K_AOT {
+                            throw self.fail(at[n - 1], f"array `{k}` is not an array of tables");
+                        }
+                        tid = kid + f"#{xs.len()}";
+                        path += f"[{xs.len()}]";
+                        xs.push(Value::Table(table));
+                    },
+                    _ => throw self.fail(at[n - 1], f"key `{k}` already holds a value"),
+                },
+            }
+            self.meta.insert(tid, K_DEFINED);
+        } else {
+            match t.get(k) {
+                none => {
+                    t.insert(k, Value::Table(table));
+                    self.meta.insert(kid, K_DEFINED);
+                },
+                x: Value => match x {
+                    Value::Table(sub) => {
+                        if (self.meta.get(kid) ?? 0) != K_IMPLICIT {
+                            throw self.fail(at[n - 1], f"table `{k}` is defined twice");
+                        }
+                        self.meta.insert(kid, K_DEFINED);
+                        table = sub;
+                    },
+                    _ => throw self.fail(at[n - 1], f"key `{k}` already holds a value"),
+                },
+            }
+            tid = kid;
+        }
+        if self.locating && path == self.want && self.hit_val == 0 { self.hit_val = open + 1; }
+        self.cur = table;
+        self.cur_id = tid;
+        self.cur_path = path;
+    }
+
+    // ---- values ----
+
+    fn value(ref self, path: str) throws (TomlError) -> Value {
+        if self.locating && path == self.want && self.hit_val == 0 { self.hit_val = self.i + 1; }
+        let b = self.peek();
+        if b == 0x22u8 {
+            if self.starts("\"\"\"") { return Value::Str(try self.ml_basic_string()); }
+            return Value::Str(try self.basic_string());
+        }
+        if b == 0x27u8 {
+            if self.starts("'''") { return Value::Str(try self.ml_literal_string()); }
+            return Value::Str(try self.literal_string());
+        }
+        if b == 0x5Bu8 { return try self.array(path); }
+        if b == 0x7Bu8 { return try self.inline_table(path); }
+        if self.starts("true") && !is_bare_byte(self.peek_at(self.i + 4)) {
+            self.i += 4;
+            return Value::Bool(true);
+        }
+        if self.starts("false") && !is_bare_byte(self.peek_at(self.i + 5)) {
+            self.i += 5;
+            return Value::Bool(false);
+        }
+        if is_digit(b) {
+            if let (d, end): (pkg::Datetime, usize) = datetime::scan(self.s, self.i) {
+                self.i = end;
+                return Value::Datetime(d);
+            }
+            let looks_dt = (is_digit(self.peek_at(self.i + 1)) && self.peek_at(self.i + 2) == 0x3Au8)
+                || (is_digit(self.peek_at(self.i + 3)) && self.peek_at(self.i + 4) == 0x2Du8);
+            if looks_dt { throw self.fail(self.i, "malformed date / time"); }
+        }
+        if is_digit(b) || b == 0x2Bu8 || b == 0x2Du8 || b == 0x69u8 || b == 0x6Eu8 { return try self.number(); }
+        throw self.found("a value");
+    }
+
+    fn number(ref self) throws (TomlError) -> Value {
+        let start = self.i;
+        while is_bare_byte(self.peek()) || self.peek() == 0x2Bu8 || self.peek() == 0x2Eu8 { self.i += 1; }
+        let t = self.s[start:self.i];
+        let body = if t.starts_with("+") || t.starts_with("-") { t[1:] } else { t };
+        if body == "inf" {
+            return Value::Float(if t.starts_with("-") { -1.0 / 0.0 } else { 1.0 / 0.0 });
+        }
+        if body == "nan" {
+            let x = 0.0 / 0.0;
+            return Value::Float(if t.starts_with("-") { -x } else { x });
+        }
+        if body.starts_with("0x") || body.starts_with("0o") || body.starts_with("0b") {
+            if body.len() != t.len() { throw self.fail(start, "a hex / octal / binary integer has no sign"); }
+            let radix = if body.starts_with("0x") { 16u32 } else if body.starts_with("0o") { 8u32 } else { 2u32 };
+            let ds = try self.underscored(body[2:], radix, start);
+            let n = Int::parse_radix(ds, radix) ?? Int::from(-1);
+            if n < Int::from(0) { throw self.fail(start, "malformed integer"); }
+            return Value::Int(try self.to_i64(n, start));
+        }
+        // Decimal: int part, then `.frac` and / or `e exp`.
+        let cut = body.len();
+        for k in 0..body.len() {
+            let b = body.byte(k);
+            if b == 0x2Eu8 || b == 0x65u8 || b == 0x45u8 {
+                cut = k;
+                break;
+            }
+        }
+        let ip = try self.underscored(body[:cut], 10u32, start);
+        if ip.len() > 1 && ip.starts_with("0") { throw self.fail(start, "leading zeros are not allowed"); }
+        let sign = if t.starts_with("-") { "-" } else { "" };
+        if cut == body.len() {
+            let n = Int::from_literal(sign + ip);
+            return Value::Int(try self.to_i64(n, start));
+        }
+        let rest = body[cut:];
+        let text = sign + ip;
+        if rest.starts_with(".") {
+            let e = rest.len();
+            for k in 1..rest.len() {
+                if rest.byte(k) == 0x65u8 || rest.byte(k) == 0x45u8 {
+                    e = k;
+                    break;
+                }
+            }
+            text += "." + try self.underscored(rest[1:e], 10u32, start);
+            rest = rest[e:];
+        }
+        if !rest.is_empty() {
+            // `e`, optional sign, digits.
+            let ex = rest[1:];
+            let es = "";
+            if ex.starts_with("+") || ex.starts_with("-") {
+                es = ex[:1];
+                ex = ex[1:];
+            }
+            text += "e" + es + try self.underscored(ex, 10u32, start);
+        }
+        let x: f64 = try text.parse::<f64>() catch _ { throw self.fail(start, "malformed float"); };
+        if !x.is_finite() { throw self.fail(start, "float out of range"); }
+        Value::Float(x)
+    }
+
+    /// `ds` without its `_`s, which must each sit between two digits;
+    /// every other char must be a digit of `radix`.
+    fn underscored(self, ds: str, radix: u32, at: usize) throws (TomlError) -> str {
+        if ds.is_empty() { throw self.fail(at, "malformed number"); }
+        let out = StrBuf::new();
+        let prev_digit = false;
+        for c in ds.chars() {
+            if c == '_' {
+                if !prev_digit { throw self.fail(at, "`_` must sit between digits"); }
+                prev_digit = false;
+            } else if c.is_digit(radix) {
+                out.push(c);
+                prev_digit = true;
+            } else {
+                throw self.fail(at, "malformed number");
+            }
+        }
+        if !prev_digit { throw self.fail(at, "`_` must sit between digits"); }
+        out.to_str()
+    }
+
+    fn to_i64(self, n: int, at: usize) throws (TomlError) -> i64 {
+        match n.to_i64() {
+            v: i64 => v,
+            none => throw self.fail(at, "integer out of range (64 bits)"),
+        }
+    }
+
+    /// Whitespace, newlines and comments inside an array.
+    fn array_ws(ref self) throws (TomlError) {
+        loop {
+            self.ws();
+            try self.comment();
+            if !self.newline() {
+                if self.peek() == 0x0Du8 { throw self.fail(self.i, "a carriage return must be followed by a newline"); }
+                return;
+            }
+        }
+    }
+
+    fn array(ref self, path: str) throws (TomlError) -> Value {
+        self.i += 1;
+        let xs: List<Value> = List::new();
+        loop {
+            try self.array_ws();
+            if self.peek() == 0x5Du8 { break; }
+            xs.push(try self.value(path + f"[{xs.len()}]"));
+            try self.array_ws();
+            if self.peek() == 0x2Cu8 {
+                self.i += 1;
+                continue;
+            }
+            if self.peek() != 0x5Du8 { throw self.found("`,` or `]`"); }
+            break;
+        }
+        self.i += 1;
+        Value::Array(xs)
+    }
+
+    fn inline_table(ref self, path: str) throws (TomlError) -> Value {
+        self.i += 1;
+        let t: OrderedDict<str, Value> = OrderedDict::new();
+        let meta: Dict<str, i32> = Dict::new();
+        self.ws();
+        if self.peek() == 0x7Du8 {
+            self.i += 1;
+            return Value::Table(t);
+        }
+        loop {
+            try self.keyval(t, "", path, meta);
+            self.ws();
+            if self.peek() == 0x2Cu8 {
+                self.i += 1;
+                self.ws();
+                if self.peek() == 0x7Du8 { throw self.fail(self.i, "trailing comma in an inline table"); }
+                continue;
+            }
+            if self.peek() != 0x7Du8 { throw self.found("`,` or `}` (an inline table is on one line)"); }
+            break;
+        }
+        self.i += 1;
+        Value::Table(t)
+    }
+
+    // ---- strings ----
+
+    fn basic_string(ref self) throws (TomlError) -> str {
+        let start = self.i;
+        self.i += 1;
+        let from = self.i;
+        // Fast path: no escapes.
+        while !self.eof() && self.peek() != 0x22u8 && self.peek() != 0x5Cu8 && !is_control(self.peek()) { self.i += 1; }
+        if self.peek() == 0x22u8 && !self.eof() {
+            self.i += 1;
+            return self.s[from:self.i - 1];
+        }
+        let out = StrBuf::new();
+        out.push_str(self.s[from:self.i]);
+        loop {
+            if self.eof() { throw self.fail(start, "unterminated string"); }
+            let b = self.peek();
+            if b == 0x22u8 { break; }
+            if b == 0x0Au8 || b == 0x0Du8 { throw self.fail(start, "unterminated string (newline in a single-line string)"); }
+            if is_control(b) { throw self.fail(self.i, "control character in string (escape it)"); }
+            if b == 0x5Cu8 {
+                try self.escape(out);
+            } else {
+                let k = self.i;
+                while !self.eof() && self.peek() != 0x22u8 && self.peek() != 0x5Cu8 && !is_control(self.peek()) { self.i += 1; }
+                out.push_str(self.s[k:self.i]);
+            }
+        }
+        self.i += 1;
+        out.to_str()
+    }
+
+    /// The escape at `\` into `out`.
+    fn escape(ref self, out: StrBuf) throws (TomlError) {
+        let at = self.i;
+        let e = self.peek_at(at + 1);
+        self.i += 2;
+        if e == 0x62u8 { out.push('\x08'); return; }
+        if e == 0x74u8 { out.push('\t'); return; }
+        if e == 0x6Eu8 { out.push('\n'); return; }
+        if e == 0x66u8 { out.push('\x0C'); return; }
+        if e == 0x72u8 { out.push('\r'); return; }
+        if e == 0x22u8 { out.push('"'); return; }
+        if e == 0x5Cu8 { out.push('\\'); return; }
+        if e == 0x75u8 || e == 0x55u8 {
+            let n = if e == 0x75u8 { 4usize } else { 8usize };
+            let v = 0u32;
+            for k in 0..n {
+                let b = self.peek_at(at + 2 + k);
+                let d = if b >= 0x30u8 && b <= 0x39u8 {
+                    (b - 0x30u8) as u32
+                } else if b >= 0x61u8 && b <= 0x66u8 {
+                    (b - 0x57u8) as u32
+                } else if b >= 0x41u8 && b <= 0x46u8 {
+                    (b - 0x37u8) as u32
+                } else {
+                    throw self.fail(at, f"`\\{e as char}` needs {n} hex digits");
+                };
+                if v > 0x10FFFFu32 { throw self.fail(at, "escape is not a Unicode scalar value"); }
+                v = v * 16u32 + d;
+            }
+            self.i = at + 2 + n;
+            match char::from_u32(v) {
+                c: char => out.push(c),
+                none => throw self.fail(at, "escape is not a Unicode scalar value"),
+            }
+            return;
+        }
+        throw self.fail(at, "unknown escape");
+    }
+
+    fn ml_basic_string(ref self) throws (TomlError) -> str {
+        let start = self.i;
+        self.i += 3;
+        self.newline();
+        let out = StrBuf::new();
+        loop {
+            if self.eof() { throw self.fail(start, "unterminated multi-line string"); }
+            let b = self.peek();
+            if b == 0x22u8 && self.starts("\"\"\"") {
+                let q = 3usize;
+                while self.peek_at(self.i + q) == 0x22u8 { q += 1; }
+                if q > 5 { throw self.fail(self.i, "too many quotes at the end of a multi-line string"); }
+                for _ in 3..q { out.push('"'); }
+                self.i += q;
+                break;
+            }
+            if b == 0x5Cu8 {
+                // A line-ending backslash trims the newline and the
+                // whitespace after it.
+                let k = self.i + 1;
+                while self.peek_at(k) == 0x20u8 || self.peek_at(k) == 0x09u8 { k += 1; }
+                if self.peek_at(k) == 0x0Au8 || (self.peek_at(k) == 0x0Du8 && self.peek_at(k + 1) == 0x0Au8) {
+                    self.i = k;
+                    loop {
+                        let c = self.peek();
+                        if c == 0x20u8 || c == 0x09u8 {
+                            self.i += 1;
+                        } else if !self.newline() {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                try self.escape(out);
+                continue;
+            }
+            if self.newline() {
+                out.push('\n');
+                continue;
+            }
+            if is_control(b) { throw self.fail(self.i, "control character in string (escape it)"); }
+            let k = self.i;
+            while !self.eof() && self.peek() != 0x22u8 && self.peek() != 0x5Cu8 && !is_control(self.peek()) { self.i += 1; }
+            if self.i == k { self.i += 1; }
+            out.push_str(self.s[k:self.i]);
+        }
+        out.to_str()
+    }
+
+    fn literal_string(ref self) throws (TomlError) -> str {
+        let start = self.i;
+        self.i += 1;
+        let from = self.i;
+        loop {
+            if self.eof() { throw self.fail(start, "unterminated string"); }
+            let b = self.peek();
+            if b == 0x27u8 { break; }
+            if b == 0x0Au8 || b == 0x0Du8 { throw self.fail(start, "unterminated string (newline in a single-line string)"); }
+            if is_control(b) { throw self.fail(self.i, "control character in string"); }
+            self.i += 1;
+        }
+        self.i += 1;
+        self.s[from:self.i - 1]
+    }
+
+    fn ml_literal_string(ref self) throws (TomlError) -> str {
+        let start = self.i;
+        self.i += 3;
+        self.newline();
+        let out = StrBuf::new();
+        loop {
+            if self.eof() { throw self.fail(start, "unterminated multi-line string"); }
+            let b = self.peek();
+            if b == 0x27u8 && self.starts("'''") {
+                let q = 3usize;
+                while self.peek_at(self.i + q) == 0x27u8 { q += 1; }
+                if q > 5 { throw self.fail(self.i, "too many quotes at the end of a multi-line string"); }
+                for _ in 3..q { out.push('\''); }
+                self.i += q;
+                break;
+            }
+            if self.newline() {
+                out.push('\n');
+                continue;
+            }
+            if is_control(b) { throw self.fail(self.i, "control character in string"); }
+            let k = self.i;
+            while !self.eof() && self.peek() != 0x27u8 && !is_control(self.peek()) { self.i += 1; }
+            if self.i == k { self.i += 1; }
+            out.push_str(self.s[k:self.i]);
+        }
+        out.to_str()
+    }
+}

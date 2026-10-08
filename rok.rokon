@@ -1,0 +1,8 @@
+Package {
+    name: "toml",
+    version: "0.1.0",
+    description: "TOML 1.0.0: Value tree with typed datetimes, parser with line:col errors, writer, typed encode/decode",
+    license: "MIT OR Apache-2.0",
+    repository: "https://github.com/rok-lang/toml",
+    deps: {},
+}

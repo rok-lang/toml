@@ -1,0 +1,901 @@
+// TOML 1.0.0. `parse` reads a document into a `Value` table,
+// `to_string` writes one, and `ToToml` / `FromToml` (with
+// `#[derive(Toml)]`) map rok types to and from `Value`, as std's `rokon`
+// does for ROKON.
+//
+// Decode errors carry a `path` (`.servers[1].port`); `from_str` turns it
+// into `line:col` by re-reading the document up to that path, so the
+// happy path keeps no positions.
+
+pub mod datetime;
+pub mod read;
+pub mod write;
+
+#[cfg(test)]
+mod toml;
+#[cfg(test)]
+mod tests;
+
+pub use datetime::{Date, Time, Datetime};
+
+/// A TOML value. A document is a `Table`; tables keep insertion order.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Value {
+    Str(str),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Datetime(Datetime),
+    Array(List<Value>),
+    Table(OrderedDict<str, Value>),
+}
+
+impl Value {
+    /// A table as a document; any other value as its inline text.
+    pub fn to_string(self) -> str {
+        match self {
+            Value::Table(t) => write::document(t),
+            _ => write::inline(self),
+        }
+    }
+
+    /// What kind of value this is, for messages.
+    pub fn kind(self) -> str {
+        match self {
+            Value::Str(_) => "string",
+            Value::Int(_) => "integer",
+            Value::Float(_) => "float",
+            Value::Bool(_) => "bool",
+            Value::Datetime(d) => d.kind(),
+            Value::Array(_) => "array",
+            Value::Table(_) => "table",
+        }
+    }
+
+    /// Key `key` of a table.
+    pub fn get(self, key: str) -> Value | none {
+        match self {
+            Value::Table(t) => t.get(key),
+            _ => none,
+        }
+    }
+
+    /// Item `i` of an array.
+    pub fn at(self, i: usize) -> Value | none {
+        match self {
+            Value::Array(xs) => xs.get(i),
+            _ => none,
+        }
+    }
+
+    pub fn as_str(self) -> str | none {
+        match self {
+            Value::Str(s) => s,
+            _ => none,
+        }
+    }
+
+    pub fn as_int(self) -> i64 | none {
+        match self {
+            Value::Int(n) => n,
+            _ => none,
+        }
+    }
+
+    /// A number as `f64` (an integer rounds to the nearest).
+    pub fn as_f64(self) -> f64 | none {
+        match self {
+            Value::Int(n) => n as f64,
+            Value::Float(x) => x,
+            _ => none,
+        }
+    }
+
+    pub fn as_bool(self) -> bool | none {
+        match self {
+            Value::Bool(b) => b,
+            _ => none,
+        }
+    }
+
+    pub fn as_datetime(self) -> Datetime | none {
+        match self {
+            Value::Datetime(d) => d,
+            _ => none,
+        }
+    }
+
+    pub fn as_array(self) -> List<Value> | none {
+        match self {
+            Value::Array(xs) => xs,
+            _ => none,
+        }
+    }
+
+    pub fn as_table(self) -> OrderedDict<str, Value> | none {
+        match self {
+            Value::Table(t) => t,
+            _ => none,
+        }
+    }
+}
+
+impl Display for Value {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(self.to_string()) }
+}
+
+/// A read or decode error. `line` / `col` (1-based, code points) are 0
+/// when the value did not come from text; `path` names the failing part
+/// (`.servers[2].port`, `."a b"`, empty at the root).
+pub struct TomlError {
+    pub msg: str;
+    pub line: u32;
+    pub col: u32;
+    pub path: str;
+    /// The error is about a key, not its value (`from_str` points at
+    /// the key).
+    pub(pkg) on_key: bool;
+}
+
+impl TomlError {
+    pub fn new(msg: str) -> TomlError {
+        TomlError { msg: msg, line: 0u32, col: 0u32, path: "", on_key: false }
+    }
+
+    /// `self` one level down: `seg` (`.name`, `[3]`) goes in front of the path.
+    pub fn within(self, seg: str) -> TomlError {
+        TomlError { msg: self.msg, line: self.line, col: self.col, path: seg + self.path, on_key: self.on_key }
+    }
+
+    fn at_key(self) -> TomlError {
+        TomlError { msg: self.msg, line: self.line, col: self.col, path: self.path, on_key: true }
+    }
+}
+
+impl Display for TomlError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        let s = if self.line > 0u32 {
+            f"{self.line}:{self.col}: {self.msg}"
+        } else if self.path != "" {
+            f"at {self.path}: {self.msg}"
+        } else {
+            self.msg
+        };
+        try f.write_str(s)
+    }
+}
+
+impl Debug for TomlError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"TomlError({self})") }
+}
+
+impl Error for TomlError {}
+
+/// A rok value as TOML. `none` (from `T | none`) leaves the key out;
+/// TOML has no null.
+pub trait ToToml {
+    fn to_toml(self) -> Value | none;
+}
+
+/// A rok value from TOML; the target type decides how `v` reads.
+pub trait FromToml {
+    fn from_toml(v: Value) throws (TomlError) -> Self;
+
+    /// A key of this type that the document leaves out: an error, except
+    /// `T | none` (`none`).
+    fn from_missing() throws (TomlError) -> Self {
+        throw TomlError::new("missing");
+    }
+}
+
+/// Read one document into a `Value::Table`.
+pub fn parse(s: str) throws (TomlError) -> Value {
+    Value::Table(try read::parse(s))
+}
+
+/// `x` as a TOML document. Panics unless `x` is written as a table, or
+/// when a `none` sits in an array.
+pub fn to_string<T: ToToml>(x: T) -> str {
+    match x.to_toml() {
+        v: Value => match v {
+            Value::Table(t) => write::document(t),
+            _ => panic(f"a TOML document is a table, not {v.kind()}"),
+        },
+        none => panic("a TOML document is a table, not none"),
+    }
+}
+
+/// Read a document as a `T`; errors carry the `line:col` of the part
+/// that did not fit.
+pub fn from_str<T: FromToml>(s: str) throws (TomlError) -> T {
+    let v = try parse(s);
+    try T::from_toml(v) catch e { throw read::locate(s, e); }
+}
+
+/// `x` as a `Value` (`none` for an absent `T | none`).
+pub fn encode<T: ToToml>(x: T) -> Value | none { x.to_toml() }
+
+/// `x` as an array item or a document: a `none` there has no TOML form.
+pub fn item<T: ToToml>(x: T) -> Value {
+    match x.to_toml() {
+        v: Value => v,
+        none => panic("none has no TOML form in an array"),
+    }
+}
+
+/// `v` as a `T`, errors placed under `seg`.
+pub fn decode<T: FromToml>(v: Value, seg: str) throws (TomlError) -> T {
+    try T::from_toml(v) catch e { throw e.within(seg); }
+}
+
+fn mismatch<T>(v: Value) -> TomlError {
+    TomlError::new(f"expected {T::type_name()}, found {v.kind()}")
+}
+
+/// The path segment of key `k` (`.k`, `."a b"`).
+pub fn seg(k: str) -> str { read::seg(k) }
+
+// ---- derive support (used by `#[derive(Toml)]`) ----
+
+/// `k = x` into `t` unless `x` is `none`.
+pub fn put<T: ToToml>(t: OrderedDict<str, Value>, k: str, x: T) {
+    if let v: Value = x.to_toml() { t.insert(k, v); }
+}
+
+/// The keys read into a struct or a named variant.
+pub struct Fields {
+    vals: OrderedDict<str, Value>;
+    ctx: str;
+}
+
+impl Fields {
+    /// `v` as the keys of `ctx`; a key not in `names` is an error.
+    pub fn of(v: Value, ctx: str, names: List<str>) throws (TomlError) -> Fields {
+        let t = match v {
+            Value::Table(t) => t,
+            _ => throw TomlError::new(f"expected {ctx} (a table), found {v.kind()}"),
+        };
+        for (k, _) in t.entries() {
+            if !names.iter().any(|n| n == k) {
+                throw TomlError::new(f"unknown field `{k}` in {ctx}").within(seg(k)).at_key();
+            }
+        }
+        Fields { vals: t, ctx: ctx }
+    }
+
+    pub fn has(self, name: str) -> bool { self.vals.contains_key(name) }
+
+    /// Key `name` as a `T`: its value, or `T::from_missing()` when absent.
+    pub fn get<T: FromToml>(self, name: str) throws (TomlError) -> T {
+        if let v: Value = self.vals.get(name) { return try decode::<T>(v, seg(name)); }
+        try T::from_missing() catch _ { throw TomlError::new(f"missing field `{name}` in {self.ctx}"); }
+    }
+}
+
+/// Tuple values: one value as itself, more as an array.
+pub fn pack(xs: List<Value>) -> Value {
+    if xs.len() == 1 { xs[0] } else { Value::Array(xs) }
+}
+
+/// `pack` reversed: `n` values of `ctx`.
+pub fn unpack(v: Value, ctx: str, n: usize) throws (TomlError) -> List<Value> {
+    if n == 1 { return [v]; }
+    let xs = match v {
+        Value::Array(xs) => xs,
+        _ => throw TomlError::new(f"expected {ctx} (an array of {n}), found {v.kind()}"),
+    };
+    if xs.len() != n { throw TomlError::new(f"{ctx} takes {n} values, found {xs.len()}"); }
+    xs
+}
+
+/// `v` as a variant of enum `ctx`: `"V"` for a unit variant, else
+/// `{ V = payload }`. (variant name, payload or `none`).
+pub fn variant_of(v: Value, ctx: str) throws (TomlError) -> (str, Value | none) {
+    match v {
+        Value::Str(s) => (s, none),
+        Value::Table(t) => {
+            if t.len() != 1 { throw TomlError::new(f"expected a {ctx} variant (a table with one key), found {t.len()} keys"); }
+            let (k, x) = t.entries().next() ?? ("", Value::Bool(false));
+            (k, x)
+        },
+        _ => throw TomlError::new(f"expected a {ctx} variant, found {v.kind()}"),
+    }
+}
+
+/// The payload of variant `name`; an error for a bare `"V"`.
+pub fn payload(p: Value | none, ctx: str, name: str) throws (TomlError) -> Value {
+    match p {
+        x: Value => x,
+        none => throw TomlError::new(f"variant `{ctx}::{name}` needs a value"),
+    }
+}
+
+/// A unit variant takes no payload.
+pub fn no_payload(p: Value | none, ctx: str, name: str) throws (TomlError) {
+    if p is Value { throw TomlError::new(f"variant `{ctx}::{name}` takes no value").within(seg(name)); }
+}
+
+pub fn unknown_variant(v: str, ctx: str) -> TomlError {
+    TomlError::new(f"`{v}` is not a variant of {ctx}")
+}
+
+/// `#[derive(Toml)]`: `ToToml` + `FromToml` for a struct or an enum.
+/// Named struct → table (a `none` field is left out); tuple struct →
+/// array (one field: the field itself); unit struct → `{}`. Enum
+/// variants: unit `"V"`, tuple `{ V = x }` / `{ V = [a, b] }`, named
+/// `{ V = { .. } }`. A missing key takes its default (`f: T = expr`),
+/// else `none` for `T | none`, else is an error.
+#[impl_derive(Toml)]
+pub @derive {
+    @where_all(toml::ToToml)
+    impl toml::ToToml for @Self {
+        fn to_toml(self) -> toml::Value | none {
+            @if_struct {
+                @apply_if(@Self.is_tuple) {
+                    return toml::pack([@for_fields { toml::item::<@field.type>(self.@field), }]);
+                }
+                @apply_if(@Self.is_unit) {
+                    return toml::Value::Table(OrderedDict::new());
+                }
+                @apply_if(@Self.is_named) {
+                    let t: OrderedDict<str, toml::Value> = OrderedDict::new();
+                    @for_fields {
+                        toml::put::<@field.type>(t, @field.name.as_str(), self.@field);
+                    }
+                    return toml::Value::Table(t);
+                }
+            }
+            @if_enum {
+                return match self {
+                    @for_variants {
+                        @variant.pattern => {
+                            @apply_if(@variant.is_unit) {
+                                toml::Value::Str(@variant.name.as_str())
+                            }
+                            @apply_if(@variant.is_tuple) {
+                                let t: OrderedDict<str, toml::Value> = OrderedDict::new();
+                                t.insert(@variant.name.as_str(), toml::pack([@for_variant_fields { toml::item::<@field.type>(@field), }]));
+                                toml::Value::Table(t)
+                            }
+                            @apply_if(@variant.is_named) {
+                                let fs: OrderedDict<str, toml::Value> = OrderedDict::new();
+                                @for_variant_fields {
+                                    toml::put::<@field.type>(fs, @field.name.as_str(), @field);
+                                }
+                                let t: OrderedDict<str, toml::Value> = OrderedDict::new();
+                                t.insert(@variant.name.as_str(), toml::Value::Table(fs));
+                                toml::Value::Table(t)
+                            }
+                        },
+                    }
+                };
+            }
+        }
+    }
+
+    @where_all(toml::FromToml)
+    impl toml::FromToml for @Self {
+        fn from_toml(v: toml::Value) throws (toml::TomlError) -> Self {
+            @if_struct {
+                @apply_if(@Self.is_tuple) {
+                    let xs = try toml::unpack(v, @Self.as_str(), [@for_fields { 0, }].len());
+                    return @Self(@for_fields {
+                        try toml::decode::<@field.type>(xs[@field.name], if xs.len() == 1 { "" } else { "[" + @field.name.as_str() + "]" }),
+                    });
+                }
+                @apply_if(@Self.is_unit) {
+                    try toml::Fields::of(v, @Self.as_str(), []);
+                    return @Self;
+                }
+                @apply_if(@Self.is_named) {
+                    let fs = try toml::Fields::of(v, @Self.as_str(), [@for_fields { @field.name.as_str(), }]);
+                    return @Self {
+                        @for_fields {
+                            @apply_if(@field.has_default) {
+                                @field: if fs.has(@field.name.as_str()) {
+                                    try fs.get::<@field.type>(@field.name.as_str())
+                                } else {
+                                    @field.default
+                                },
+                            }
+                            @apply_if(!@field.has_default) {
+                                @field: try fs.get::<@field.type>(@field.name.as_str()),
+                            }
+                        }
+                    };
+                }
+            }
+            @if_enum {
+                let (name, p) = try toml::variant_of(v, @Self.as_str());
+                @for_variants {
+                    if name == @variant.name.as_str() {
+                        @apply_if(@variant.is_unit) {
+                            try toml::no_payload(p, @Self.as_str(), name);
+                            return @Self.name::@variant.name;
+                        }
+                        @apply_if(@variant.is_tuple) {
+                            let n = [@for_variant_fields { 0, }].len();
+                            let ctx = @Self.as_str() + "::" + name;
+                            let xs = try toml::unpack(try toml::payload(p, @Self.as_str(), name), ctx, n) catch e { throw e.within(toml::seg(name)); };
+                            return @Self.name::@variant.name(@for_variant_fields {
+                                try toml::decode::<@field.type>(xs[@field.name], toml::seg(name) + if n == 1 { "" } else { "[" + @field.name.as_str() + "]" }),
+                            });
+                        }
+                        @apply_if(@variant.is_named) {
+                            let ctx = @Self.as_str() + "::" + name;
+                            let fs = try toml::Fields::of(try toml::payload(p, @Self.as_str(), name), ctx,
+                                [@for_variant_fields { @field.name.as_str(), }]) catch e { throw e.within(toml::seg(name)); };
+                            return @Self.name::@variant.name {
+                                @for_variant_fields {
+                                    @field.name: try fs.get::<@field.type>(@field.name.as_str()) catch e { throw e.within(toml::seg(name)); },
+                                }
+                            };
+                        }
+                    }
+                }
+                throw toml::unknown_variant(name, @Self.as_str());
+            }
+        }
+    }
+}
+
+// ---- impls for the standard types ----
+
+impl ToToml for Value {
+    fn to_toml(self) -> Value | none { self }
+}
+
+impl FromToml for Value {
+    fn from_toml(v: Value) throws (TomlError) -> Value { v }
+}
+
+impl ToToml for bool {
+    fn to_toml(self) -> Value | none { Value::Bool(self) }
+}
+
+impl FromToml for bool {
+    fn from_toml(v: Value) throws (TomlError) -> bool {
+        match v {
+            Value::Bool(b) => b,
+            _ => throw mismatch::<bool>(v),
+        }
+    }
+}
+
+impl ToToml for str {
+    fn to_toml(self) -> Value | none { Value::Str(self) }
+}
+
+impl FromToml for str {
+    fn from_toml(v: Value) throws (TomlError) -> str {
+        match v {
+            Value::Str(s) => s,
+            _ => throw mismatch::<str>(v),
+        }
+    }
+}
+
+/// A one-character string.
+impl ToToml for char {
+    fn to_toml(self) -> Value | none { Value::Str(f"{self}") }
+}
+
+impl FromToml for char {
+    fn from_toml(v: Value) throws (TomlError) -> char {
+        if let s: str = v.as_str() {
+            let cs = s.chars();
+            if let c: char = cs.next() {
+                if cs.next() is none { return c; }
+            }
+        }
+        throw TomlError::new(f"expected char (a one-character string), found {v.kind()}");
+    }
+}
+
+impl ToToml for Datetime {
+    fn to_toml(self) -> Value | none { Value::Datetime(self) }
+}
+
+impl FromToml for Datetime {
+    fn from_toml(v: Value) throws (TomlError) -> Datetime {
+        match v {
+            Value::Datetime(d) => d,
+            _ => throw mismatch::<Datetime>(v),
+        }
+    }
+}
+
+/// A local date.
+impl ToToml for Date {
+    fn to_toml(self) -> Value | none { Value::Datetime(Datetime { date: self, time: none, offset: none }) }
+}
+
+impl FromToml for Date {
+    fn from_toml(v: Value) throws (TomlError) -> Date {
+        if let d: Datetime = v.as_datetime() {
+            if d.time is none {
+                if let x: Date = d.date { return x; }
+            }
+        }
+        throw TomlError::new(f"expected a local date, found {v.kind()}");
+    }
+}
+
+/// A local time.
+impl ToToml for Time {
+    fn to_toml(self) -> Value | none { Value::Datetime(Datetime { date: none, time: self, offset: none }) }
+}
+
+impl FromToml for Time {
+    fn from_toml(v: Value) throws (TomlError) -> Time {
+        if let d: Datetime = v.as_datetime() {
+            if d.date is none {
+                if let x: Time = d.time { return x; }
+            }
+        }
+        throw TomlError::new(f"expected a local time, found {v.kind()}");
+    }
+}
+
+fn int_of<T>(v: Value) throws (TomlError) -> i64 {
+    match v {
+        Value::Int(n) => n,
+        _ => throw mismatch::<T>(v),
+    }
+}
+
+fn out_of_range<T>(n: int) -> TomlError {
+    TomlError::new(f"integer {n} is out of range for {T::type_name()}")
+}
+
+/// Panics beyond 64 bits (TOML integers are `i64`).
+impl ToToml for Int {
+    fn to_toml(self) -> Value | none {
+        match self.to_i64() {
+            n: i64 => Value::Int(n),
+            none => panic(f"integer {self} has no TOML form (64 bits)"),
+        }
+    }
+}
+
+impl FromToml for Int {
+    fn from_toml(v: Value) throws (TomlError) -> int { Int::from_i64(try int_of::<int>(v)) }
+}
+
+impl ToToml for i8 { fn to_toml(self) -> Value | none { Value::Int(self as i64) } }
+impl ToToml for i16 { fn to_toml(self) -> Value | none { Value::Int(self as i64) } }
+impl ToToml for i32 { fn to_toml(self) -> Value | none { Value::Int(self as i64) } }
+impl ToToml for i64 { fn to_toml(self) -> Value | none { Value::Int(self) } }
+impl ToToml for isize { fn to_toml(self) -> Value | none { Value::Int(self as i64) } }
+impl ToToml for u8 { fn to_toml(self) -> Value | none { Value::Int(self as i64) } }
+impl ToToml for u16 { fn to_toml(self) -> Value | none { Value::Int(self as i64) } }
+impl ToToml for u32 { fn to_toml(self) -> Value | none { Value::Int(self as i64) } }
+/// Panics above `i64::MAX` (TOML integers are `i64`).
+impl ToToml for u64 { fn to_toml(self) -> Value | none { Int::from(self).to_toml() } }
+impl ToToml for usize { fn to_toml(self) -> Value | none { Int::from(self).to_toml() } }
+impl FromToml for i8 {
+    fn from_toml(v: Value) throws (TomlError) -> i8 {
+        let n = Int::from_i64(try int_of::<i8>(v));
+        try i8::try_from(n) catch _ { throw out_of_range::<i8>(n); }
+    }
+}
+impl FromToml for i16 {
+    fn from_toml(v: Value) throws (TomlError) -> i16 {
+        let n = Int::from_i64(try int_of::<i16>(v));
+        try i16::try_from(n) catch _ { throw out_of_range::<i16>(n); }
+    }
+}
+impl FromToml for i32 {
+    fn from_toml(v: Value) throws (TomlError) -> i32 {
+        let n = Int::from_i64(try int_of::<i32>(v));
+        try i32::try_from(n) catch _ { throw out_of_range::<i32>(n); }
+    }
+}
+impl FromToml for i64 {
+    fn from_toml(v: Value) throws (TomlError) -> i64 {
+        let n = Int::from_i64(try int_of::<i64>(v));
+        try i64::try_from(n) catch _ { throw out_of_range::<i64>(n); }
+    }
+}
+impl FromToml for isize {
+    fn from_toml(v: Value) throws (TomlError) -> isize {
+        let n = Int::from_i64(try int_of::<isize>(v));
+        try isize::try_from(n) catch _ { throw out_of_range::<isize>(n); }
+    }
+}
+impl FromToml for u8 {
+    fn from_toml(v: Value) throws (TomlError) -> u8 {
+        let n = Int::from_i64(try int_of::<u8>(v));
+        try u8::try_from(n) catch _ { throw out_of_range::<u8>(n); }
+    }
+}
+impl FromToml for u16 {
+    fn from_toml(v: Value) throws (TomlError) -> u16 {
+        let n = Int::from_i64(try int_of::<u16>(v));
+        try u16::try_from(n) catch _ { throw out_of_range::<u16>(n); }
+    }
+}
+impl FromToml for u32 {
+    fn from_toml(v: Value) throws (TomlError) -> u32 {
+        let n = Int::from_i64(try int_of::<u32>(v));
+        try u32::try_from(n) catch _ { throw out_of_range::<u32>(n); }
+    }
+}
+impl FromToml for u64 {
+    fn from_toml(v: Value) throws (TomlError) -> u64 {
+        let n = Int::from_i64(try int_of::<u64>(v));
+        try u64::try_from(n) catch _ { throw out_of_range::<u64>(n); }
+    }
+}
+impl FromToml for usize {
+    fn from_toml(v: Value) throws (TomlError) -> usize {
+        let n = Int::from_i64(try int_of::<usize>(v));
+        try usize::try_from(n) catch _ { throw out_of_range::<usize>(n); }
+    }
+}
+
+/// A float target takes an integer too.
+fn f64_of<T>(v: Value) throws (TomlError) -> f64 {
+    match v {
+        Value::Float(x) => x,
+        Value::Int(n) => n as f64,
+        _ => throw mismatch::<T>(v),
+    }
+}
+
+impl ToToml for f64 {
+    fn to_toml(self) -> Value | none { Value::Float(self) }
+}
+
+impl FromToml for f64 {
+    fn from_toml(v: Value) throws (TomlError) -> f64 { try f64_of::<f64>(v) }
+}
+
+impl ToToml for f32 {
+    // The shortest `f32` digits (`0.1`, not `0.10000000149011612`).
+    fn to_toml(self) -> Value | none {
+        if !self.is_finite() { return Value::Float(self as f64); }
+        Value::Float(try f"{self:e}".parse::<f64>() catch _ { self as f64 })
+    }
+}
+
+impl FromToml for f32 {
+    fn from_toml(v: Value) throws (TomlError) -> f32 { (try f64_of::<f32>(v)) as f32 }
+}
+
+impl ToToml for Float {
+    fn to_toml(self) -> Value | none { Value::Float(self.to_f64()) }
+}
+
+impl FromToml for Float {
+    fn from_toml(v: Value) throws (TomlError) -> float { Float::from_f64(try f64_of::<float>(v)) }
+}
+
+/// `none` leaves the key out.
+impl<T: ToToml> ToToml for T | none {
+    fn to_toml(self) -> Value | none {
+        match self {
+            none => none,
+            x: T => x.to_toml(),
+        }
+    }
+}
+
+impl<T: FromToml> FromToml for T | none {
+    fn from_toml(v: Value) throws (TomlError) -> T | none { try T::from_toml(v) }
+
+    fn from_missing() throws (TomlError) -> T | none { none }
+}
+
+fn items_of<T>(v: Value) throws (TomlError) -> List<Value> {
+    match v {
+        Value::Array(xs) => xs,
+        _ => throw mismatch::<T>(v),
+    }
+}
+
+impl<T: ToToml> ToToml for List<T> {
+    fn to_toml(self) -> Value | none {
+        let out: List<Value> = List::with_capacity(self.len());
+        for x in self { out.push(item(x)); }
+        Value::Array(out)
+    }
+}
+
+impl<T: FromToml> FromToml for List<T> {
+    fn from_toml(v: Value) throws (TomlError) -> List<T> {
+        let xs = try items_of::<List<T>>(v);
+        let out: List<T> = List::with_capacity(xs.len());
+        let i = 0usize;
+        for x in xs {
+            out.push(try decode::<T>(x, f"[{i}]"));
+            i += 1;
+        }
+        out
+    }
+}
+
+impl<T: ToToml + Hash> ToToml for Set<T> {
+    fn to_toml(self) -> Value | none {
+        let out: List<Value> = List::with_capacity(self.len());
+        for x in self { out.push(item(x)); }
+        Value::Array(out)
+    }
+}
+
+impl<T: FromToml + Hash> FromToml for Set<T> {
+    fn from_toml(v: Value) throws (TomlError) -> Set<T> {
+        let out: Set<T> = Set::new();
+        for x in try List::<T>::from_toml(v) { out.insert(x); }
+        out
+    }
+}
+
+impl<T: ToToml + Hash> ToToml for OrderedSet<T> {
+    fn to_toml(self) -> Value | none {
+        let out: List<Value> = List::with_capacity(self.len());
+        for x in self { out.push(item(x)); }
+        Value::Array(out)
+    }
+}
+
+impl<T: FromToml + Hash> FromToml for OrderedSet<T> {
+    fn from_toml(v: Value) throws (TomlError) -> OrderedSet<T> {
+        let out: OrderedSet<T> = OrderedSet::new();
+        for x in try List::<T>::from_toml(v) { out.insert(x); }
+        out
+    }
+}
+
+impl<T: ToToml, const N: usize> ToToml for [T; N] {
+    fn to_toml(self) -> Value | none {
+        let out: List<Value> = List::with_capacity(N);
+        for i in 0..N { out.push(item(self[i])); }
+        Value::Array(out)
+    }
+}
+
+impl<T: FromToml, const N: usize> FromToml for [T; N] {
+    fn from_toml(v: Value) throws (TomlError) -> [T; N] {
+        let xs = try List::<T>::from_toml(v);
+        if xs.len() != N { throw TomlError::new(f"expected {N} items, found {xs.len()}"); }
+        // The array is seeded with its first item: `[T; 0]` cannot be read.
+        if N == 0 { throw TomlError::new("cannot read a zero-length array"); }
+        let out: [T; N] = [xs[0]; N];
+        for i in 1..N { out[i] = xs[i]; }
+        out
+    }
+
+    fn from_missing() throws (TomlError) -> [T; N] {
+        throw TomlError::new("missing");
+    }
+}
+
+/// A table key for a dict key: a string as is, an integer in decimal.
+fn key_text(k: Value) -> str {
+    match k {
+        Value::Str(s) => s,
+        Value::Int(n) => f"{n}",
+        Value::Bool(b) => if b { "true" } else { "false" },
+        _ => panic(f"a {k.kind()} cannot be a TOML key"),
+    }
+}
+
+/// Key `k` as a `K`: as a string, else as the integer it spells.
+fn key_of<K: FromToml>(k: str) throws (TomlError) -> K {
+    try K::from_toml(Value::Str(k)) catch e {
+        if let n: int = Int::parse_radix(k, 10u32) {
+            if let m: i64 = n.to_i64() {
+                return try K::from_toml(Value::Int(m)) catch _ { throw e.within(seg(k)).at_key(); };
+            }
+        }
+        throw e.within(seg(k)).at_key();
+    }
+}
+
+fn entries_of<T>(v: Value) throws (TomlError) -> OrderedDict<str, Value> {
+    match v {
+        Value::Table(t) => t,
+        _ => throw mismatch::<T>(v),
+    }
+}
+
+/// Keys are written as `key_text` (strings, integers, bools); `none`
+/// values are left out.
+impl<K: ToToml + Hash, V: ToToml> ToToml for Dict<K, V> {
+    fn to_toml(self) -> Value | none {
+        let out: OrderedDict<str, Value> = OrderedDict::new();
+        for (k, v) in self.entries() { put(out, key_text(item(k)), v); }
+        Value::Table(out)
+    }
+}
+
+impl<K: FromToml + Hash, V: FromToml> FromToml for Dict<K, V> {
+    fn from_toml(v: Value) throws (TomlError) -> Dict<K, V> {
+        let out: Dict<K, V> = Dict::new();
+        for (k, x) in (try entries_of::<Dict<K, V>>(v)).entries() {
+            out.insert(try key_of::<K>(k), try decode::<V>(x, seg(k)));
+        }
+        out
+    }
+}
+
+impl<K: ToToml + Hash, V: ToToml> ToToml for OrderedDict<K, V> {
+    fn to_toml(self) -> Value | none {
+        let out: OrderedDict<str, Value> = OrderedDict::new();
+        for (k, v) in self.entries() { put(out, key_text(item(k)), v); }
+        Value::Table(out)
+    }
+}
+
+impl<K: FromToml + Hash, V: FromToml> FromToml for OrderedDict<K, V> {
+    fn from_toml(v: Value) throws (TomlError) -> OrderedDict<K, V> {
+        let out: OrderedDict<K, V> = OrderedDict::new();
+        for (k, x) in (try entries_of::<OrderedDict<K, V>>(v)).entries() {
+            out.insert(try key_of::<K>(k), try decode::<V>(x, seg(k)));
+        }
+        out
+    }
+}
+
+fn tuple_of<T>(v: Value, n: usize) throws (TomlError) -> List<Value> {
+    let xs = try items_of::<T>(v);
+    if xs.len() != n { throw TomlError::new(f"expected {n} items, found {xs.len()}"); }
+    xs
+}
+
+// Tuples as arrays, up to 6 elements.
+impl<A: ToToml> ToToml for (A,) {
+    fn to_toml(self) -> Value | none { Value::Array([item(self.0)]) }
+}
+impl<A: FromToml> FromToml for (A,) {
+    fn from_toml(v: Value) throws (TomlError) -> (A,) {
+        let xs = try tuple_of::<(A,)>(v, 1);
+        (try decode::<A>(xs[0], "[0]"),)
+    }
+}
+impl<A: ToToml, B: ToToml> ToToml for (A, B) {
+    fn to_toml(self) -> Value | none { Value::Array([item(self.0), item(self.1)]) }
+}
+impl<A: FromToml, B: FromToml> FromToml for (A, B) {
+    fn from_toml(v: Value) throws (TomlError) -> (A, B) {
+        let xs = try tuple_of::<(A, B)>(v, 2);
+        (try decode::<A>(xs[0], "[0]"), try decode::<B>(xs[1], "[1]"))
+    }
+}
+impl<A: ToToml, B: ToToml, C: ToToml> ToToml for (A, B, C) {
+    fn to_toml(self) -> Value | none { Value::Array([item(self.0), item(self.1), item(self.2)]) }
+}
+impl<A: FromToml, B: FromToml, C: FromToml> FromToml for (A, B, C) {
+    fn from_toml(v: Value) throws (TomlError) -> (A, B, C) {
+        let xs = try tuple_of::<(A, B, C)>(v, 3);
+        (try decode::<A>(xs[0], "[0]"), try decode::<B>(xs[1], "[1]"), try decode::<C>(xs[2], "[2]"))
+    }
+}
+impl<A: ToToml, B: ToToml, C: ToToml, D: ToToml> ToToml for (A, B, C, D) {
+    fn to_toml(self) -> Value | none { Value::Array([item(self.0), item(self.1), item(self.2), item(self.3)]) }
+}
+impl<A: FromToml, B: FromToml, C: FromToml, D: FromToml> FromToml for (A, B, C, D) {
+    fn from_toml(v: Value) throws (TomlError) -> (A, B, C, D) {
+        let xs = try tuple_of::<(A, B, C, D)>(v, 4);
+        (try decode::<A>(xs[0], "[0]"), try decode::<B>(xs[1], "[1]"), try decode::<C>(xs[2], "[2]"), try decode::<D>(xs[3], "[3]"))
+    }
+}
+impl<A: ToToml, B: ToToml, C: ToToml, D: ToToml, E: ToToml> ToToml for (A, B, C, D, E) {
+    fn to_toml(self) -> Value | none { Value::Array([item(self.0), item(self.1), item(self.2), item(self.3), item(self.4)]) }
+}
+impl<A: FromToml, B: FromToml, C: FromToml, D: FromToml, E: FromToml> FromToml for (A, B, C, D, E) {
+    fn from_toml(v: Value) throws (TomlError) -> (A, B, C, D, E) {
+        let xs = try tuple_of::<(A, B, C, D, E)>(v, 5);
+        (try decode::<A>(xs[0], "[0]"), try decode::<B>(xs[1], "[1]"), try decode::<C>(xs[2], "[2]"), try decode::<D>(xs[3], "[3]"), try decode::<E>(xs[4], "[4]"))
+    }
+}
+impl<A: ToToml, B: ToToml, C: ToToml, D: ToToml, E: ToToml, F: ToToml> ToToml for (A, B, C, D, E, F) {
+    fn to_toml(self) -> Value | none { Value::Array([item(self.0), item(self.1), item(self.2), item(self.3), item(self.4), item(self.5)]) }
+}
+impl<A: FromToml, B: FromToml, C: FromToml, D: FromToml, E: FromToml, F: FromToml> FromToml for (A, B, C, D, E, F) {
+    fn from_toml(v: Value) throws (TomlError) -> (A, B, C, D, E, F) {
+        let xs = try tuple_of::<(A, B, C, D, E, F)>(v, 6);
+        (try decode::<A>(xs[0], "[0]"), try decode::<B>(xs[1], "[1]"), try decode::<C>(xs[2], "[2]"), try decode::<D>(xs[3], "[3]"), try decode::<E>(xs[4], "[4]"), try decode::<F>(xs[5], "[5]"))
+    }
+}
