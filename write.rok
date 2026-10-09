@@ -1,14 +1,12 @@
 // TOML text of a table: plain keys first, then `[table]` sections and
 // `[[array]]` elements, each table under its full dotted header.
 
-use pkg::Value;
-
-const WIDTH: usize = 100;
+use pkg::{Value, Datetime, Options, Version};
 
 /// `t` as a document.
-pub fn document(t: OrderedDict<str, Value>) -> str {
+pub fn document(t: OrderedDict<str, Value>, o: Options) -> str {
     let out = StrBuf::new();
-    table(out, t, "");
+    table(out, t, "", o);
     out.to_str()
 }
 
@@ -32,11 +30,11 @@ fn is_section(v: Value) -> bool { is_table(v) || is_aot(v) }
 
 /// `t`'s plain keys, then its sections under `prefix` (`a.b`, or empty
 /// at the root).
-fn table(out: StrBuf, t: OrderedDict<str, Value>, prefix: str) {
+fn table(out: StrBuf, t: OrderedDict<str, Value>, prefix: str, o: Options) {
     for (k, v) in t.entries() {
         if is_section(v) { continue; }
         let key = key_text(k);
-        out.push_str(key + " = " + pretty(v, key.char_count() + 3) + "\n");
+        out.push_str(key + " = " + pretty(v, 0, key.char_count() + 3, 0, o) + "\n");
     }
     for (k, v) in t.entries() {
         let name = if prefix.is_empty() { key_text(k) } else { prefix + "." + key_text(k) };
@@ -46,13 +44,13 @@ fn table(out: StrBuf, t: OrderedDict<str, Value>, prefix: str) {
                 if sub.is_empty() || sub.values().any(|x| !is_section(x)) {
                     section(out, "[" + name + "]");
                 }
-                table(out, sub, name);
+                table(out, sub, name, o);
             },
             Value::Array(xs) => {
                 if !is_aot(v) { continue; }
                 for x in xs {
                     section(out, "[[" + name + "]]");
-                    if let Value::Table(sub) = x { table(out, sub, name); }
+                    if let Value::Table(sub) = x { table(out, sub, name, o); }
                 }
             },
             _ => {},
@@ -65,47 +63,73 @@ fn section(out: StrBuf, header: str) {
     out.push_str(header + "\n");
 }
 
-/// `v` starting at column `col`: one line if it fits, else (an array)
-/// one item per line.
-fn pretty(v: Value, col: usize) -> str {
-    let one = inline(v);
-    if col + one.char_count() <= WIDTH { return one; }
+/// `v` starting at column `col` of a line indented `indent`, followed by
+/// `tail` more columns: one line if it fits in `o.width`, else an array
+/// (and with 1.1, an inline table) one item per line.
+pub fn pretty(v: Value, indent: usize, col: usize, tail: usize, o: Options) -> str {
+    let one = inline(v, o);
+    if col + one.char_count() + tail <= o.width { return one; }
+    let inner = indent + 4;
+    let pad = " ".repeat(inner);
+    let b = StrBuf::new();
     match v {
         Value::Array(xs) => {
-            let b = StrBuf::new();
             b.push_str("[\n");
-            for x in xs { b.push_str("    " + inline(x) + ",\n"); }
-            b.push_str("]");
-            b.to_str()
+            for x in xs { b.push_str(pad + pretty(x, inner, inner, 1, o) + ",\n"); }
+            b.push_str(" ".repeat(indent) + "]");
         },
-        _ => one,
+        Value::Table(t) => {
+            if o.version != Version::V1_1 || t.is_empty() { return one; }
+            b.push_str("{\n");
+            for (k, x) in t.entries() {
+                let key = key_text(k) + " = ";
+                b.push_str(pad + key + pretty(x, inner, inner + key.char_count(), 1, o) + ",\n");
+            }
+            b.push_str(" ".repeat(indent) + "}");
+        },
+        _ => return one,
     }
+    b.to_str()
 }
 
 /// `v` on one line (`{ k = v }` for a table).
-pub fn inline(v: Value) -> str {
+fn inline(v: Value, o: Options) -> str {
     match v {
-        Value::Str(s) => quoted(s),
+        Value::Str(s) => quoted(s, o.version),
         Value::Int(n) => f"{n}",
         Value::Float(x) => float_text(x),
         Value::Bool(b) => if b { "true" } else { "false" },
-        Value::Datetime(d) => f"{d}",
+        Value::Datetime(d) => datetime_text(d, o.version),
         Value::Array(xs) => {
             let parts: List<str> = List::new();
-            for x in xs { parts.push(inline(x)); }
+            for x in xs { parts.push(inline(x, o)); }
             "[" + parts.join(", ") + "]"
         },
         Value::Table(t) => {
             if t.is_empty() { return "{}"; }
             let parts: List<str> = List::new();
-            for (k, x) in t.entries() { parts.push(key_text(k) + " = " + inline(x)); }
+            for (k, x) in t.entries() { parts.push(key_text(k) + " = " + inline(x, o)); }
             "{ " + parts.join(", ") + " }"
         },
     }
 }
 
+/// RFC 3339 text; with 1.1, zero seconds (and no fraction) are left out
+/// (`07:32` is `07:32:00`).
+fn datetime_text(d: Datetime, v: Version) -> str {
+    let t = f"{d}";
+    if v != Version::V1_1 { return t; }
+    if let tm: pkg::Time = d.time {
+        if tm.second == 0u8 && tm.nanosecond == 0u32 {
+            let at = if d.date is pkg::Date { 11 } else { 0 };
+            return t[:at + 5] + t[at + 8:];
+        }
+    }
+    t
+}
+
 /// A key: bare (`A-Za-z0-9_-`) when it can be, else quoted.
-pub fn key_text(k: str) -> str { if is_bare(k) { k } else { quoted(k) } }
+pub fn key_text(k: str) -> str { if is_bare(k) { k } else { quoted(k, Version::V1_0) } }
 
 pub fn is_bare(k: str) -> bool {
     if k.is_empty() { return false; }
@@ -117,8 +141,10 @@ pub fn is_bare(k: str) -> bool {
     true
 }
 
-/// `s` as a basic string: `"`, `\` and control characters escaped.
-pub fn quoted(s: str) -> str {
+/// `s` as a basic string: `"`, `\` and control characters escaped (with
+/// 1.1, as `\e` / `\xHH` rather than `\u00HH`).
+pub fn quoted(s: str, v: Version) -> str {
+    let v11 = v == Version::V1_1;
     let out = StrBuf::new();
     out.push('"');
     let from = 0usize;
@@ -141,9 +167,11 @@ pub fn quoted(s: str) -> str {
             out.push_str("\\b");
         } else if b == 0x0Cu8 {
             out.push_str("\\f");
+        } else if v11 && b == 0x1Bu8 {
+            out.push_str("\\e");
         } else {
             let h = b as u32;
-            out.push_str(f"\\u{h:04X}");
+            out.push_str(if v11 { f"\\x{h:02X}" } else { f"\\u{h:04X}" });
         }
     }
     out.push_str(s[from:]);

@@ -1,4 +1,4 @@
-// TOML 1.0.0. `parse` reads a document into a `Value` table,
+// TOML 1.1.0. `parse` reads a document into a `Value` table,
 // `to_string` writes one, and `ToToml` / `FromToml` (with
 // `#[derive(Toml)]`) map rok types to and from `Value`, as std's `rokon`
 // does for ROKON.
@@ -32,10 +32,11 @@ pub enum Value {
 
 impl Value {
     /// A table as a document; any other value as its inline text.
-    pub fn to_string(self) -> str {
+    pub fn to_string(self, opts: Options | none = none) -> str {
+        let o = opts ?? Options {};
         match self {
-            Value::Table(t) => write::document(t),
-            _ => write::inline(self),
+            Value::Table(t) => write::document(t, o),
+            _ => write::pretty(self, 0, 0, 0, o),
         }
     }
 
@@ -188,17 +189,36 @@ pub trait FromToml {
     }
 }
 
-/// Read one document into a `Value::Table`.
-pub fn parse(s: str) throws (TomlError) -> Value {
-    Value::Table(try read::parse(s))
+/// A TOML version.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Version {
+    V1_0,
+    V1_1,
+}
+
+/// How documents are written.
+pub struct Options {
+    /// The forms the output may use. 1.1 adds `\e` / `\xHH` escapes,
+    /// times without zero seconds and inline tables over several lines.
+    /// Default: 1.0, which every TOML reader takes.
+    pub version: Version = Version::V1_0;
+    /// Columns an array or inline table may take before it is split over
+    /// lines. Default: 100.
+    pub width: usize = 100;
+}
+
+/// Read one document into a `Value::Table`. `version` 1.0 rejects the
+/// forms TOML 1.1 added.
+pub fn parse(s: str, version: Version = Version::V1_1) throws (TomlError) -> Value {
+    Value::Table(try read::parse(s, version))
 }
 
 /// `x` as a TOML document. Panics unless `x` is written as a table, or
 /// when a `none` sits in an array.
-pub fn to_string<T: ToToml>(x: T) -> str {
+pub fn to_string<T: ToToml>(x: T, opts: Options | none = none) -> str {
     match x.to_toml() {
         v: Value => match v {
-            Value::Table(t) => write::document(t),
+            Value::Table(t) => write::document(t, opts ?? Options {}),
             _ => panic(f"a TOML document is a table, not {v.kind()}"),
         },
         none => panic("a TOML document is a table, not none"),
@@ -208,7 +228,7 @@ pub fn to_string<T: ToToml>(x: T) -> str {
 /// Read a document as a `T`; errors carry the `line:col` of the part
 /// that did not fit.
 pub fn from_str<T: FromToml>(s: str) throws (TomlError) -> T {
-    let v = try parse(s);
+    let v = try parse(s, Version::V1_1);
     try T::from_toml(v) catch e { throw read::locate(s, e); }
 }
 

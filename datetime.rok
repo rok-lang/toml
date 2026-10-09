@@ -38,10 +38,10 @@ impl Datetime {
         if self.date is Date { "date-local" } else { "time-local" }
     }
 
-    /// Read a TOML date-time (`1979-05-27T07:32:00Z`, `1979-05-27 07:32:00`,
-    /// `1979-05-27`, `07:32:00.999`).
+    /// Read a TOML 1.1 date-time (`1979-05-27T07:32:00Z`,
+    /// `1979-05-27 07:32:00`, `1979-05-27`, `07:32:00.999`, `07:32`).
     pub fn parse(s: str) -> Datetime | none {
-        let (d, n) = scan(s, 0)?;
+        let (d, n) = scan(s, 0, true)?;
         if n != s.len() { return none; }
         d
     }
@@ -99,8 +99,9 @@ fn days_in(y: u32, m: u32) -> u32 {
 }
 
 /// A date-time at `at` of `s`: the value and the index after it, or
-/// `none` when the text there is not a valid date-time.
-pub fn scan(s: str, at: usize) -> (Datetime, usize) | none {
+/// `none` when the text there is not a valid date-time. `v11` lets the
+/// seconds be left out.
+pub fn scan(s: str, at: usize, v11: bool) -> (Datetime, usize) | none {
     let i = at;
     let date: Date | none = none;
     if byte_at(s, i + 4) == 0x2Du8 {
@@ -121,13 +122,20 @@ pub fn scan(s: str, at: usize) -> (Datetime, usize) | none {
         i += 1;
     }
     let h = digits(s, i, 2)?;
-    if byte_at(s, i + 2) != 0x3Au8 || byte_at(s, i + 5) != 0x3Au8 { return none; }
+    if byte_at(s, i + 2) != 0x3Au8 { return none; }
     let mi = digits(s, i + 3, 2)?;
-    let se = digits(s, i + 6, 2)?;
+    i += 5;
+    // Seconds may be left out (TOML 1.1), and then there is no fraction.
+    let se = 0u32;
+    let has_sec = byte_at(s, i) == 0x3Au8;
+    if !has_sec && !v11 { return none; }
+    if has_sec {
+        se = digits(s, i + 1, 2)?;
+        i += 3;
+    }
     if h > 23u32 || mi > 59u32 || se > 60u32 { return none; }
-    i += 8;
     let nano = 0u32;
-    if byte_at(s, i) == 0x2Eu8 {
+    if has_sec && byte_at(s, i) == 0x2Eu8 {
         i += 1;
         let start = i;
         let scale = 100000000u32;

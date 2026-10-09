@@ -1,8 +1,8 @@
-// TOML 1.0.0 reader: a recursive descent over the bytes of the
+// TOML 1.1.0 reader: a recursive descent over the bytes of the
 // document that builds the table tree as it goes, with each table's
 // origin kept by path so redefinitions are caught.
 
-use pkg::{Value, TomlError};
+use pkg::{Value, TomlError, Version};
 use pkg::datetime;
 
 // How a table (or array) came to be; tables made inside inline values
@@ -16,6 +16,8 @@ const K_AOT: i32 = 5;       // an array of tables
 struct Parser {
     s: str;
     i: usize;
+    /// TOML 1.1 forms are allowed.
+    v11: bool;
     /// Kind of each table / array of tables by path id (`id`).
     meta: Dict<str, i32>;
     root: OrderedDict<str, Value>;
@@ -36,12 +38,13 @@ fn enc(k: str) -> str { f"{k.len()}:{k}" }
 
 /// The display segment of key `k`: `.k`, or `."k"` unless `k` is bare.
 pub fn seg(k: str) -> str {
-    if pkg::write::is_bare(k) { "." + k } else { "." + pkg::write::quoted(k) }
+    if pkg::write::is_bare(k) { "." + k } else { "." + pkg::write::quoted(k, Version::V1_0) }
 }
 
 /// Read one document.
-pub fn parse(s: str) throws (TomlError) -> OrderedDict<str, Value> {
+pub fn parse(s: str, version: Version) throws (TomlError) -> OrderedDict<str, Value> {
     let p = parser(s, false, "");
+    p.v11 = version == Version::V1_1;
     try p.document();
     p.root
 }
@@ -49,12 +52,13 @@ pub fn parse(s: str) throws (TomlError) -> OrderedDict<str, Value> {
 fn parser(s: str, locating: bool, want: str) -> Parser {
     let root: OrderedDict<str, Value> = OrderedDict::new();
     Parser {
-        s: s, i: 0, meta: Dict::new(), root: root, cur: root, cur_id: "", cur_path: "",
+        s: s, i: 0, v11: true, meta: Dict::new(), root: root, cur: root, cur_id: "", cur_path: "",
         locating: locating, want: want, hit_val: 0, hit_key: 0,
     }
 }
 
-/// `e` (from decoding `s`'s value) with the `line:col` of `e.path`.
+/// `e` (from decoding `s`'s value, read as TOML 1.1) with the `line:col`
+/// of `e.path`.
 pub fn locate(s: str, e: TomlError) -> TomlError {
     let p = parser(s, true, e.path);
     try p.document() catch _ { return e; };
@@ -381,7 +385,7 @@ impl Parser {
             return Value::Bool(false);
         }
         if is_digit(b) {
-            if let (d, end): (pkg::Datetime, usize) = datetime::scan(self.s, self.i) {
+            if let (d, end): (pkg::Datetime, usize) = datetime::scan(self.s, self.i, self.v11) {
                 self.i = end;
                 return Value::Datetime(d);
             }
@@ -485,8 +489,8 @@ impl Parser {
         }
     }
 
-    /// Whitespace, newlines and comments inside an array.
-    fn array_ws(ref self) throws (TomlError) {
+    /// Whitespace, newlines and comments inside an array or inline table.
+    fn blank(ref self) throws (TomlError) {
         loop {
             self.ws();
             try self.comment();
@@ -501,10 +505,10 @@ impl Parser {
         self.i += 1;
         let xs: List<Value> = List::new();
         loop {
-            try self.array_ws();
+            try self.blank();
             if self.peek() == 0x5Du8 { break; }
             xs.push(try self.value(path + f"[{xs.len()}]"));
-            try self.array_ws();
+            try self.blank();
             if self.peek() == 0x2Cu8 {
                 self.i += 1;
                 continue;
@@ -516,29 +520,36 @@ impl Parser {
         Value::Array(xs)
     }
 
+    /// `{ k = v, .. }`. TOML 1.1 allows newlines, comments and a trailing
+    /// comma; 1.0 keeps it on one line without one.
     fn inline_table(ref self, path: str) throws (TomlError) -> Value {
         self.i += 1;
         let t: OrderedDict<str, Value> = OrderedDict::new();
         let meta: Dict<str, i32> = Dict::new();
-        self.ws();
-        if self.peek() == 0x7Du8 {
-            self.i += 1;
-            return Value::Table(t);
-        }
+        let first = true;
         loop {
+            try self.inline_ws();
+            if self.peek() == 0x7Du8 {
+                if !first && !self.v11 { throw self.fail(self.i, "trailing comma in an inline table (TOML 1.1)"); }
+                break;
+            }
+            first = false;
             try self.keyval(t, "", path, meta);
-            self.ws();
+            try self.inline_ws();
             if self.peek() == 0x2Cu8 {
                 self.i += 1;
-                self.ws();
-                if self.peek() == 0x7Du8 { throw self.fail(self.i, "trailing comma in an inline table"); }
                 continue;
             }
-            if self.peek() != 0x7Du8 { throw self.found("`,` or `}` (an inline table is on one line)"); }
+            if self.peek() != 0x7Du8 { throw self.found("`,` or `}`"); }
             break;
         }
         self.i += 1;
         Value::Table(t)
+    }
+
+    fn inline_ws(ref self) throws (TomlError) {
+        if self.v11 { return try self.blank(); }
+        self.ws();
     }
 
     // ---- strings ----
@@ -585,8 +596,9 @@ impl Parser {
         if e == 0x72u8 { out.push('\r'); return; }
         if e == 0x22u8 { out.push('"'); return; }
         if e == 0x5Cu8 { out.push('\\'); return; }
-        if e == 0x75u8 || e == 0x55u8 {
-            let n = if e == 0x75u8 { 4usize } else { 8usize };
+        if e == 0x65u8 && self.v11 { out.push('\x1B'); return; }
+        if (e == 0x78u8 && self.v11) || e == 0x75u8 || e == 0x55u8 {
+            let n = if e == 0x78u8 { 2usize } else if e == 0x75u8 { 4usize } else { 8usize };
             let v = 0u32;
             for k in 0..n {
                 let b = self.peek_at(at + 2 + k);
