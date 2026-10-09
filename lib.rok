@@ -12,8 +12,6 @@ pub mod read;
 pub mod write;
 
 #[cfg(test)]
-mod toml;
-#[cfg(test)]
 mod tests;
 
 pub use datetime::{Date, Time, Datetime};
@@ -189,7 +187,7 @@ pub trait FromToml {
     }
 }
 
-/// A TOML version.
+/// A TOML version. The names keep the version's dot as `_`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Version {
     V1_0,
@@ -347,22 +345,22 @@ pub fn unknown_variant(v: str, ctx: str) -> TomlError {
 /// else `none` for `T | none`, else is an error.
 #[impl_derive(Toml)]
 pub @derive {
-    @where_all(toml::ToToml)
-    impl toml::ToToml for @Self {
-        fn to_toml(self) -> toml::Value | none {
+    @where_all(pkg::ToToml)
+    impl pkg::ToToml for @Self {
+        fn to_toml(self) -> pkg::Value | none {
             @if_struct {
                 @apply_if(@Self.is_tuple) {
-                    return toml::pack([@for_fields { toml::item::<@field.type>(self.@field), }]);
+                    return pkg::pack([@for_fields { pkg::item::<@field.type>(self.@field), }]);
                 }
                 @apply_if(@Self.is_unit) {
-                    return toml::Value::Table(OrderedDict::new());
+                    return pkg::Value::Table(OrderedDict::new());
                 }
                 @apply_if(@Self.is_named) {
-                    let t: OrderedDict<str, toml::Value> = OrderedDict::new();
+                    let t: OrderedDict<str, pkg::Value> = OrderedDict::new();
                     @for_fields {
-                        toml::put::<@field.type>(t, @field.name.as_str(), self.@field);
+                        pkg::put::<@field.type>(t, @field.name.as_str(), self.@field);
                     }
-                    return toml::Value::Table(t);
+                    return pkg::Value::Table(t);
                 }
             }
             @if_enum {
@@ -370,21 +368,21 @@ pub @derive {
                     @for_variants {
                         @variant.pattern => {
                             @apply_if(@variant.is_unit) {
-                                toml::Value::Str(@variant.name.as_str())
+                                pkg::Value::Str(@variant.name.as_str())
                             }
                             @apply_if(@variant.is_tuple) {
-                                let t: OrderedDict<str, toml::Value> = OrderedDict::new();
-                                t.insert(@variant.name.as_str(), toml::pack([@for_variant_fields { toml::item::<@field.type>(@field), }]));
-                                toml::Value::Table(t)
+                                let t: OrderedDict<str, pkg::Value> = OrderedDict::new();
+                                t.insert(@variant.name.as_str(), pkg::pack([@for_variant_fields { pkg::item::<@field.type>(@field), }]));
+                                pkg::Value::Table(t)
                             }
                             @apply_if(@variant.is_named) {
-                                let fs: OrderedDict<str, toml::Value> = OrderedDict::new();
+                                let fs: OrderedDict<str, pkg::Value> = OrderedDict::new();
                                 @for_variant_fields {
-                                    toml::put::<@field.type>(fs, @field.name.as_str(), @field);
+                                    pkg::put::<@field.type>(fs, @field.name.as_str(), @field);
                                 }
-                                let t: OrderedDict<str, toml::Value> = OrderedDict::new();
-                                t.insert(@variant.name.as_str(), toml::Value::Table(fs));
-                                toml::Value::Table(t)
+                                let t: OrderedDict<str, pkg::Value> = OrderedDict::new();
+                                t.insert(@variant.name.as_str(), pkg::Value::Table(fs));
+                                pkg::Value::Table(t)
                             }
                         },
                     }
@@ -393,22 +391,22 @@ pub @derive {
         }
     }
 
-    @where_all(toml::FromToml)
-    impl toml::FromToml for @Self {
-        fn from_toml(v: toml::Value) throws (toml::TomlError) -> Self {
+    @where_all(pkg::FromToml)
+    impl pkg::FromToml for @Self {
+        fn from_toml(v: pkg::Value) throws (pkg::TomlError) -> Self {
             @if_struct {
                 @apply_if(@Self.is_tuple) {
-                    let xs = try toml::unpack(v, @Self.as_str(), [@for_fields { 0, }].len());
+                    let xs = try pkg::unpack(v, @Self.as_str(), [@for_fields { 0, }].len());
                     return @Self(@for_fields {
-                        try toml::decode::<@field.type>(xs[@field.name], if xs.len() == 1 { "" } else { "[" + @field.name.as_str() + "]" }),
+                        try pkg::decode::<@field.type>(xs[@field.name], if xs.len() == 1 { "" } else { "[" + @field.name.as_str() + "]" }),
                     });
                 }
                 @apply_if(@Self.is_unit) {
-                    try toml::Fields::of(v, @Self.as_str(), []);
+                    try pkg::Fields::of(v, @Self.as_str(), []);
                     return @Self;
                 }
                 @apply_if(@Self.is_named) {
-                    let fs = try toml::Fields::of(v, @Self.as_str(), [@for_fields { @field.name.as_str(), }]);
+                    let fs = try pkg::Fields::of(v, @Self.as_str(), [@for_fields { @field.name.as_str(), }]);
                     return @Self {
                         @for_fields {
                             @apply_if(@field.has_default) {
@@ -426,34 +424,34 @@ pub @derive {
                 }
             }
             @if_enum {
-                let (name, p) = try toml::variant_of(v, @Self.as_str());
+                let (name, p) = try pkg::variant_of(v, @Self.as_str());
                 @for_variants {
                     if name == @variant.name.as_str() {
                         @apply_if(@variant.is_unit) {
-                            try toml::no_payload(p, @Self.as_str(), name);
+                            try pkg::no_payload(p, @Self.as_str(), name);
                             return @Self.name::@variant.name;
                         }
                         @apply_if(@variant.is_tuple) {
                             let n = [@for_variant_fields { 0, }].len();
                             let ctx = @Self.as_str() + "::" + name;
-                            let xs = try toml::unpack(try toml::payload(p, @Self.as_str(), name), ctx, n) catch e { throw e.within(toml::seg(name)); };
+                            let xs = try pkg::unpack(try pkg::payload(p, @Self.as_str(), name), ctx, n) catch e { throw e.within(pkg::seg(name)); };
                             return @Self.name::@variant.name(@for_variant_fields {
-                                try toml::decode::<@field.type>(xs[@field.name], toml::seg(name) + if n == 1 { "" } else { "[" + @field.name.as_str() + "]" }),
+                                try pkg::decode::<@field.type>(xs[@field.name], pkg::seg(name) + if n == 1 { "" } else { "[" + @field.name.as_str() + "]" }),
                             });
                         }
                         @apply_if(@variant.is_named) {
                             let ctx = @Self.as_str() + "::" + name;
-                            let fs = try toml::Fields::of(try toml::payload(p, @Self.as_str(), name), ctx,
-                                [@for_variant_fields { @field.name.as_str(), }]) catch e { throw e.within(toml::seg(name)); };
+                            let fs = try pkg::Fields::of(try pkg::payload(p, @Self.as_str(), name), ctx,
+                                [@for_variant_fields { @field.name.as_str(), }]) catch e { throw e.within(pkg::seg(name)); };
                             return @Self.name::@variant.name {
                                 @for_variant_fields {
-                                    @field.name: try fs.get::<@field.type>(@field.name.as_str()) catch e { throw e.within(toml::seg(name)); },
+                                    @field.name: try fs.get::<@field.type>(@field.name.as_str()) catch e { throw e.within(pkg::seg(name)); },
                                 }
                             };
                         }
                     }
                 }
-                throw toml::unknown_variant(name, @Self.as_str());
+                throw pkg::unknown_variant(name, @Self.as_str());
             }
         }
     }

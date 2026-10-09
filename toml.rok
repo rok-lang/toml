@@ -1,7 +1,0 @@
-// The package under its own name, for `#[derive(Toml)]` in its tests:
-// the derive's paths resolve at the use site.
-
-pub use pkg::{
-    Value, TomlError, ToToml, FromToml, Fields, encode, item, put, decode, pack, unpack, variant_of,
-    payload, no_payload, unknown_variant, seg,
-};

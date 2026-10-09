@@ -3,7 +3,6 @@
 
 use rok::std::fs;
 use pkg::{Value, Datetime, Date, Time, Version, Options};
-use pkg::toml;
 
 fn expect(ok: bool, what: str) {
     if !ok { panic(f"check failed: {what}"); }
