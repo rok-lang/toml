@@ -178,8 +178,6 @@ impl Parser {
         }
     }
 
-    // ---- keys ----
-
     /// A dotted key: (segments, start index of each).
     fn key(ref self) throws (TomlError) -> (List<str>, List<usize>) {
         let keys: List<str> = List::new();
@@ -255,8 +253,6 @@ impl Parser {
         t.insert(last, v);
         if self.peek_at(vat) == 0x7Bu8 { meta.insert(tid + enc(last), K_INLINE); }
     }
-
-    // ---- headers ----
 
     /// `[a.b]` or `[[a.b]]`.
     fn header(ref self) throws (TomlError) {
@@ -360,8 +356,6 @@ impl Parser {
         self.cur_id = tid;
         self.cur_path = path;
     }
-
-    // ---- values ----
 
     fn value(ref self, path: str) throws (TomlError) -> Value {
         if self.locating && path == self.want && self.hit_val == 0 { self.hit_val = self.i + 1; }
@@ -551,8 +545,6 @@ impl Parser {
         if self.v11 { return try self.blank(); }
         self.ws();
     }
-
-    // ---- strings ----
 
     fn basic_string(ref self) throws (TomlError) -> str {
         let start = self.i;

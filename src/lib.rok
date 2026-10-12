@@ -253,7 +253,7 @@ fn mismatch<T>(v: Value) -> TomlError {
 /// The path segment of key `k` (`.k`, `."a b"`).
 pub fn seg(k: str) -> str { read::seg(k) }
 
-// ---- derive support (used by `#[derive(Toml)]`) ----
+// Used by `#[derive(Toml)]`.
 
 /// `k = x` into `t` unless `x` is `none`.
 pub fn put<T: ToToml>(t: OrderedDict<str, Value>, k: str, x: T) {
@@ -456,8 +456,6 @@ pub @derive {
         }
     }
 }
-
-// ---- impls for the standard types ----
 
 impl ToToml for Value {
     fn to_toml(self) -> Value | none { self }

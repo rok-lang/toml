@@ -250,8 +250,6 @@ fn err_of10(s: str) -> str {
     "ok"
 }
 
-// ---- typed ----
-
 #[derive(Toml, Clone, PartialEq, Debug)]
 struct Server {
     host: str;
