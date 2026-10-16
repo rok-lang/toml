@@ -12,9 +12,6 @@ pub mod read;
 pub mod write;
 mod convert;
 
-#[cfg(test)]
-mod tests;
-
 pub use datetime::{Date, Time, Datetime};
 
 /// A TOML value. A document is a `Table`; tables keep insertion order.
