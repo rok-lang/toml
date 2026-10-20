@@ -111,6 +111,7 @@ Every valid document is also written with each writer version (at a narrow width
 
 ```bash
 rok test        # tests
+rok bench       # benchmarks
 rok fmt --check
 ```
 

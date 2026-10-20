@@ -1,0 +1,30 @@
+// Parse and serialize a large TOML document (spec 9.9.11).
+
+use rok::core::bench::Bench;
+use rok::core::hint::black_box;
+
+// ~2000 array-of-tables entries.
+fn bench_doc() -> str {
+    let b = StrBuf::new();
+    let i = 0i64;
+    while i < 2000i64 {
+        b.push_str(f"[[server.{i}]]\n");
+        b.push_str(f"id = {i}\nname = \"host-{i}\"\nenabled = true\nratio = {i}.5\n");
+        b.push_str("tags = [\"a\", \"b\", \"c\"]\nnote = \"lorem ipsum dolor sit amet\"\n\n");
+        i += 1i64;
+    }
+    b.to_str()
+}
+
+#[bench]
+fn parse_doc(b: Bench) {
+    let s = bench_doc();
+    b.bytes(s.len() as i64);
+    b.iter(|| try pkg::parse(black_box(s)) catch e { panic(f"{e}"); });
+}
+
+#[bench]
+fn serialize_doc(b: Bench) {
+    let v = try pkg::parse(bench_doc()) catch e { panic(f"{e}"); };
+    b.iter(|| black_box(v).to_string());
+}
