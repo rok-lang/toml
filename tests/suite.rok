@@ -12,7 +12,7 @@ fn hex_bytes(h: str) -> List<u8> {
     let out: List<u8> = List::with_capacity(h.len() / 2);
     let i = 0usize;
     while i + 1 < h.len() {
-        let n = Int::parse_radix(h[i:i + 2], 16u32) ?? Int::from(0);
+        let n = (try? Int::parse_radix(h[i:i + 2], 16u32)) ?? Int::from(0);
         out.push((n.to_i64() ?? 0) as u8);
         i += 2;
     }
@@ -271,7 +271,7 @@ struct Config {
     started: Datetime;
     day: Date;
     servers: List<Server>;
-    limits: OrderedDict<str, i64>;
+    limits: Dict<str, i64>;
     modes: List<Mode>;
     ids: Dict<u32, str>;
     ratio: f32;

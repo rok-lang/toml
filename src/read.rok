@@ -20,9 +20,9 @@ struct Parser {
     v11: bool;
     /// Kind of each table / array of tables by path id (`id`).
     meta: Dict<str, i32>;
-    root: OrderedDict<str, Value>;
+    root: Dict<str, Value>;
     /// The table the current section writes to, its id and display path.
-    cur: OrderedDict<str, Value>;
+    cur: Dict<str, Value>;
     cur_id: str;
     cur_path: str;
     /// `locate` mode: where the value / key at display path `want` starts
@@ -42,7 +42,7 @@ pub fn seg(k: str) -> str {
 }
 
 /// Read one document.
-pub fn parse(s: str, version: Version) throws (TomlError) -> OrderedDict<str, Value> {
+pub fn parse(s: str, version: Version) throws (TomlError) -> Dict<str, Value> {
     let p = parser(s, false, "");
     p.v11 = version == Version::V1_1;
     try p.document();
@@ -50,7 +50,7 @@ pub fn parse(s: str, version: Version) throws (TomlError) -> OrderedDict<str, Va
 }
 
 fn parser(s: str, locating: bool, want: str) -> Parser {
-    let root: OrderedDict<str, Value> = OrderedDict::new();
+    let root: Dict<str, Value> = Dict::new();
     Parser {
         s: s, i: 0, v11: true, meta: Dict::new(), root: root, cur: root, cur_id: "", cur_path: "",
         locating: locating, want: want, hit_val: 0, hit_key: 0,
@@ -210,7 +210,7 @@ impl Parser {
     }
 
     /// `key = value` into `table` (path id `id`, display path `path`).
-    fn keyval(ref self, table: OrderedDict<str, Value>, id: str, path: str, meta: Dict<str, i32>) throws (TomlError) {
+    fn keyval(ref self, table: Dict<str, Value>, id: str, path: str, meta: Dict<str, i32>) throws (TomlError) {
         let (keys, at) = try self.key();
         if self.peek() != 0x3Du8 { throw self.found("`=` after a key"); }
         self.i += 1;
@@ -231,7 +231,7 @@ impl Parser {
             let kid = tid + enc(k);
             match t.get(k) {
                 none => {
-                    let sub: OrderedDict<str, Value> = OrderedDict::new();
+                    let sub: Dict<str, Value> = Dict::new();
                     t.insert(k, Value::Table(sub));
                     meta.insert(kid, K_DOTTED);
                     t = sub;
@@ -277,7 +277,7 @@ impl Parser {
             path += seg(k);
             match t.get(k) {
                 none => {
-                    let sub: OrderedDict<str, Value> = OrderedDict::new();
+                    let sub: Dict<str, Value> = Dict::new();
                     t.insert(k, Value::Table(sub));
                     self.meta.insert(kid, K_IMPLICIT);
                     t = sub;
@@ -310,7 +310,7 @@ impl Parser {
         let k = keys[n - 1];
         let kid = tid + enc(k);
         path += seg(k);
-        let table: OrderedDict<str, Value> = OrderedDict::new();
+        let table: Dict<str, Value> = Dict::new();
         if aot {
             match t.get(k) {
                 none => {
@@ -407,7 +407,7 @@ impl Parser {
             if body.len() != t.len() { throw self.fail(start, "a hex / octal / binary integer has no sign"); }
             let radix = if body.starts_with("0x") { 16u32 } else if body.starts_with("0o") { 8u32 } else { 2u32 };
             let ds = try self.underscored(body[2:], radix, start);
-            let n = Int::parse_radix(ds, radix) ?? Int::from(-1);
+            let n = (try? Int::parse_radix(ds, radix)) ?? Int::from(-1);
             if n < Int::from(0) { throw self.fail(start, "malformed integer"); }
             return Value::Int(try self.to_i64(n, start));
         }
@@ -518,7 +518,7 @@ impl Parser {
     /// comma; 1.0 keeps it on one line without one.
     fn inline_table(ref self, path: str) throws (TomlError) -> Value {
         self.i += 1;
-        let t: OrderedDict<str, Value> = OrderedDict::new();
+        let t: Dict<str, Value> = Dict::new();
         let meta: Dict<str, i32> = Dict::new();
         let first = true;
         loop {

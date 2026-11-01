@@ -23,7 +23,7 @@ pub enum Value {
     Bool(bool),
     Datetime(Datetime),
     Array(List<Value>),
-    Table(OrderedDict<str, Value>),
+    Table(Dict<str, Value>),
 }
 
 impl Value {
@@ -109,7 +109,7 @@ impl Value {
         }
     }
 
-    pub fn as_table(self) -> OrderedDict<str, Value> | none {
+    pub fn as_table(self) -> Dict<str, Value> | none {
         match self {
             Value::Table(t) => t,
             _ => none,
@@ -254,13 +254,13 @@ pub fn seg(k: str) -> str { read::seg(k) }
 // Used by `#[derive(Toml)]`.
 
 /// `k = x` into `t` unless `x` is `none`.
-pub fn put<T: ToToml>(t: OrderedDict<str, Value>, k: str, x: T) {
+pub fn put<T: ToToml>(t: Dict<str, Value>, k: str, x: T) {
     if let v: Value = x.to_toml() { t.insert(k, v); }
 }
 
 /// The keys read into a struct or a named variant.
 pub struct Fields {
-    vals: OrderedDict<str, Value>;
+    vals: Dict<str, Value>;
     ctx: str;
 }
 
@@ -271,7 +271,7 @@ impl Fields {
             Value::Table(t) => t,
             _ => throw TomlError::new(f"expected {ctx} (a table), found {v.kind()}"),
         };
-        for (k, _) in t.entries() {
+        for (k, _) in t.iter() {
             if !names.iter().any(|n| n == k) {
                 throw TomlError::new(f"unknown field `{k}` in {ctx}").within(seg(k)).at_key();
             }
@@ -311,7 +311,7 @@ pub fn variant_of(v: Value, ctx: str) throws (TomlError) -> (str, Value | none) 
         Value::Str(s) => (s, none),
         Value::Table(t) => {
             if t.len() != 1 { throw TomlError::new(f"expected a {ctx} variant (a table with one key), found {t.len()} keys"); }
-            let (k, x) = t.entries().next() ?? ("", Value::Bool(false));
+            let (k, x) = t.iter().next() ?? ("", Value::Bool(false));
             (k, x)
         },
         _ => throw TomlError::new(f"expected a {ctx} variant, found {v.kind()}"),
@@ -351,10 +351,10 @@ pub @derive {
                     return pkg::pack([@for_fields { pkg::item::<@field.type>(self.@field), }]);
                 }
                 @apply_if(@Self.is_unit) {
-                    return pkg::Value::Table(OrderedDict::new());
+                    return pkg::Value::Table(Dict::new());
                 }
                 @apply_if(@Self.is_named) {
-                    let t: OrderedDict<str, pkg::Value> = OrderedDict::new();
+                    let t: Dict<str, pkg::Value> = Dict::new();
                     @for_fields {
                         pkg::put::<@field.type>(t, @field.name.as_str(), self.@field);
                     }
@@ -369,16 +369,16 @@ pub @derive {
                                 pkg::Value::Str(@variant.name.as_str())
                             }
                             @apply_if(@variant.is_tuple) {
-                                let t: OrderedDict<str, pkg::Value> = OrderedDict::new();
+                                let t: Dict<str, pkg::Value> = Dict::new();
                                 t.insert(@variant.name.as_str(), pkg::pack([@for_variant_fields { pkg::item::<@field.type>(@field), }]));
                                 pkg::Value::Table(t)
                             }
                             @apply_if(@variant.is_named) {
-                                let fs: OrderedDict<str, pkg::Value> = OrderedDict::new();
+                                let fs: Dict<str, pkg::Value> = Dict::new();
                                 @for_variant_fields {
                                     pkg::put::<@field.type>(fs, @field.name.as_str(), @field);
                                 }
-                                let t: OrderedDict<str, pkg::Value> = OrderedDict::new();
+                                let t: Dict<str, pkg::Value> = Dict::new();
                                 t.insert(@variant.name.as_str(), pkg::Value::Table(fs));
                                 pkg::Value::Table(t)
                             }

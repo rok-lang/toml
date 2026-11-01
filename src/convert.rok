@@ -293,22 +293,6 @@ impl<T: FromToml + Hash> FromToml for Set<T> {
     }
 }
 
-impl<T: ToToml + Hash> ToToml for OrderedSet<T> {
-    fn to_toml(self) -> Value | none {
-        let out: List<Value> = List::with_capacity(self.len());
-        for x in self { out.push(item(x)); }
-        Value::Array(out)
-    }
-}
-
-impl<T: FromToml + Hash> FromToml for OrderedSet<T> {
-    fn from_toml(v: Value) throws (TomlError) -> OrderedSet<T> {
-        let out: OrderedSet<T> = OrderedSet::new();
-        for x in try List::<T>::from_toml(v) { out.insert(x); }
-        out
-    }
-}
-
 impl<T: ToToml, const N: usize> ToToml for [T; N] {
     fn to_toml(self) -> Value | none {
         let out: List<Value> = List::with_capacity(N);
@@ -346,7 +330,7 @@ fn key_text(k: Value) -> str {
 /// Key `k` as a `K`: as a string, else as the integer it spells.
 fn key_of<K: FromToml>(k: str) throws (TomlError) -> K {
     try K::from_toml(Value::Str(k)) catch e {
-        if let n: int = Int::parse_radix(k, 10u32) {
+        if let n: int = try? Int::parse_radix(k, 10u32) {
             if let m: i64 = n.to_i64() {
                 return try K::from_toml(Value::Int(m)) catch _ { throw e.within(seg(k)).at_key(); };
             }
@@ -355,7 +339,7 @@ fn key_of<K: FromToml>(k: str) throws (TomlError) -> K {
     }
 }
 
-fn entries_of<T>(v: Value) throws (TomlError) -> OrderedDict<str, Value> {
+fn entries_of<T>(v: Value) throws (TomlError) -> Dict<str, Value> {
     match v {
         Value::Table(t) => t,
         _ => throw mismatch::<T>(v),
@@ -366,8 +350,8 @@ fn entries_of<T>(v: Value) throws (TomlError) -> OrderedDict<str, Value> {
 /// values are left out.
 impl<K: ToToml + Hash, V: ToToml> ToToml for Dict<K, V> {
     fn to_toml(self) -> Value | none {
-        let out: OrderedDict<str, Value> = OrderedDict::new();
-        for (k, v) in self.entries() { put(out, key_text(item(k)), v); }
+        let out: Dict<str, Value> = Dict::new();
+        for (k, v) in self.iter() { put(out, key_text(item(k)), v); }
         Value::Table(out)
     }
 }
@@ -375,25 +359,7 @@ impl<K: ToToml + Hash, V: ToToml> ToToml for Dict<K, V> {
 impl<K: FromToml + Hash, V: FromToml> FromToml for Dict<K, V> {
     fn from_toml(v: Value) throws (TomlError) -> Dict<K, V> {
         let out: Dict<K, V> = Dict::new();
-        for (k, x) in (try entries_of::<Dict<K, V>>(v)).entries() {
-            out.insert(try key_of::<K>(k), try decode::<V>(x, seg(k)));
-        }
-        out
-    }
-}
-
-impl<K: ToToml + Hash, V: ToToml> ToToml for OrderedDict<K, V> {
-    fn to_toml(self) -> Value | none {
-        let out: OrderedDict<str, Value> = OrderedDict::new();
-        for (k, v) in self.entries() { put(out, key_text(item(k)), v); }
-        Value::Table(out)
-    }
-}
-
-impl<K: FromToml + Hash, V: FromToml> FromToml for OrderedDict<K, V> {
-    fn from_toml(v: Value) throws (TomlError) -> OrderedDict<K, V> {
-        let out: OrderedDict<K, V> = OrderedDict::new();
-        for (k, x) in (try entries_of::<OrderedDict<K, V>>(v)).entries() {
+        for (k, x) in (try entries_of::<Dict<K, V>>(v)).iter() {
             out.insert(try key_of::<K>(k), try decode::<V>(x, seg(k)));
         }
         out
