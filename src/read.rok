@@ -424,7 +424,7 @@ impl Parser {
         if ip.len() > 1 && ip.starts_with("0") { throw self.fail(start, "leading zeros are not allowed"); }
         let sign = if t.starts_with("-") { "-" } else { "" };
         if cut == body.len() {
-            let n = Int::from_literal(sign + ip);
+            let n = try (sign + ip).parse::<Int>() catch e { throw self.fail(start, e.message()); };
             return Value::Int(try self.to_i64(n, start));
         }
         let rest = body[cut:];
