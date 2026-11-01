@@ -26,5 +26,5 @@ fn parse_doc(b: Bench) {
 #[bench]
 fn serialize_doc(b: Bench) {
     let v = try pkg::parse(bench_doc()) catch e { panic(f"{e}"); };
-    b.iter(|| black_box(v).to_string());
+    b.iter(|| black_box(v).to_str());
 }

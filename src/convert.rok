@@ -351,7 +351,7 @@ fn entries_of<T>(v: Value) throws (TomlError) -> Dict<str, Value> {
 impl<K: ToToml + Hash, V: ToToml> ToToml for Dict<K, V> {
     fn to_toml(self) -> Value | none {
         let out: Dict<str, Value> = Dict::new();
-        for (k, v) in self.iter() { put(out, key_text(item(k)), v); }
+        for (k, v) in self { put(out, key_text(item(k)), v); }
         Value::Table(out)
     }
 }
@@ -359,7 +359,7 @@ impl<K: ToToml + Hash, V: ToToml> ToToml for Dict<K, V> {
 impl<K: FromToml + Hash, V: FromToml> FromToml for Dict<K, V> {
     fn from_toml(v: Value) throws (TomlError) -> Dict<K, V> {
         let out: Dict<K, V> = Dict::new();
-        for (k, x) in (try entries_of::<Dict<K, V>>(v)).iter() {
+        for (k, x) in try entries_of::<Dict<K, V>>(v) {
             out.insert(try key_of::<K>(k), try decode::<V>(x, seg(k)));
         }
         out

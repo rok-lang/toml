@@ -31,12 +31,12 @@ fn is_section(v: Value) -> bool { is_table(v) || is_aot(v) }
 /// `t`'s plain keys, then its sections under `prefix` (`a.b`, or empty
 /// at the root).
 fn table(out: StrBuf, t: Dict<str, Value>, prefix: str, o: Options) {
-    for (k, v) in t.iter() {
+    for (k, v) in t {
         if is_section(v) { continue; }
         let key = key_text(k);
         out.push_str(key + " = " + pretty(v, 0, key.char_count() + 3, 0, o) + "\n");
     }
-    for (k, v) in t.iter() {
+    for (k, v) in t {
         let name = if prefix.is_empty() { key_text(k) } else { prefix + "." + key_text(k) };
         match v {
             Value::Table(sub) => {
@@ -81,7 +81,7 @@ pub fn pretty(v: Value, indent: usize, col: usize, tail: usize, o: Options) -> s
         Value::Table(t) => {
             if o.version != Version::V1_1 || t.is_empty() { return one; }
             b.push_str("{\n");
-            for (k, x) in t.iter() {
+            for (k, x) in t {
                 let key = key_text(k) + " = ";
                 b.push_str(pad + key + pretty(x, inner, inner + key.char_count(), 1, o) + ",\n");
             }
@@ -108,7 +108,7 @@ fn inline(v: Value, o: Options) -> str {
         Value::Table(t) => {
             if t.is_empty() { return "{}"; }
             let parts: List<str> = List::new();
-            for (k, x) in t.iter() { parts.push(key_text(k) + " = " + inline(x, o)); }
+            for (k, x) in t { parts.push(key_text(k) + " = " + inline(x, o)); }
             "{ " + parts.join(", ") + " }"
         },
     }

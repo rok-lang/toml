@@ -619,7 +619,7 @@ impl Parser {
     fn ml_basic_string(ref self) throws (TomlError) -> str {
         let start = self.i;
         self.i += 3;
-        self.newline();
+        _ = self.newline();
         let out = StrBuf::new();
         loop {
             if self.eof() { throw self.fail(start, "unterminated multi-line string"); }
@@ -684,7 +684,7 @@ impl Parser {
     fn ml_literal_string(ref self) throws (TomlError) -> str {
         let start = self.i;
         self.i += 3;
-        self.newline();
+        _ = self.newline();
         let out = StrBuf::new();
         loop {
             if self.eof() { throw self.fail(start, "unterminated multi-line string"); }

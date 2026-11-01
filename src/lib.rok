@@ -1,5 +1,5 @@
 // TOML 1.1.0. `parse` reads a document into a `Value` table,
-// `to_string` writes one, and `ToToml` / `FromToml` (with
+// `to_str` writes one, and `ToToml` / `FromToml` (with
 // `#[derive(Toml)]`) map rok types to and from `Value`, as std's `rokon`
 // does for ROKON.
 //
@@ -28,7 +28,7 @@ pub enum Value {
 
 impl Value {
     /// A table as a document; any other value as its inline text.
-    pub fn to_string(self, opts: Options | none = none) -> str {
+    pub fn to_str(self, opts: Options | none = none) -> str {
         let o = opts ?? Options {};
         match self {
             Value::Table(t) => write::document(t, o),
@@ -118,17 +118,17 @@ impl Value {
 }
 
 impl Display for Value {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(self.to_string()) }
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(self.to_str()) }
 }
 
 /// A read or decode error. `line` / `col` (1-based, code points) are 0
 /// when the value did not come from text; `path` names the failing part
 /// (`.servers[2].port`, `."a b"`, empty at the root).
 pub struct TomlError {
-    pub msg: str;
-    pub line: u32;
-    pub col: u32;
-    pub path: str;
+    pub(pkg) msg: str;
+    pub(pkg) line: u32;
+    pub(pkg) col: u32;
+    pub(pkg) path: str;
     /// The error is about a key, not its value (`from_str` points at
     /// the key).
     pub(pkg) on_key: bool;
@@ -143,6 +143,15 @@ impl TomlError {
     pub fn within(self, seg: str) -> TomlError {
         TomlError { msg: self.msg, line: self.line, col: self.col, path: seg + self.path, on_key: self.on_key }
     }
+
+    /// What went wrong, without the position.
+    pub fn message(self) -> str { self.msg }
+    /// 1-based line, 0 when the value did not come from text.
+    pub fn line(self) -> u32 { self.line }
+    /// 1-based column in code points, 0 when the value did not come from text.
+    pub fn col(self) -> u32 { self.col }
+    /// The failing part (`.servers[2].port`), empty at the root.
+    pub fn path(self) -> str { self.path }
 
     pub(pkg) fn at_key(self) -> TomlError {
         TomlError { msg: self.msg, line: self.line, col: self.col, path: self.path, on_key: true }
@@ -211,7 +220,7 @@ pub fn parse(s: str, version: Version = Version::V1_1) throws (TomlError) -> Val
 
 /// `x` as a TOML document. Panics unless `x` is written as a table, or
 /// when a `none` sits in an array.
-pub fn to_string<T: ToToml>(x: T, opts: Options | none = none) -> str {
+pub fn to_str<T: ToToml>(x: T, opts: Options | none = none) -> str {
     match x.to_toml() {
         v: Value => match v {
             Value::Table(t) => write::document(t, opts ?? Options {}),
@@ -271,7 +280,7 @@ impl Fields {
             Value::Table(t) => t,
             _ => throw TomlError::new(f"expected {ctx} (a table), found {v.kind()}"),
         };
-        for (k, _) in t.iter() {
+        for (k, _) in t {
             if !names.iter().any(|n| n == k) {
                 throw TomlError::new(f"unknown field `{k}` in {ctx}").within(seg(k)).at_key();
             }
@@ -311,7 +320,7 @@ pub fn variant_of(v: Value, ctx: str) throws (TomlError) -> (str, Value | none) 
         Value::Str(s) => (s, none),
         Value::Table(t) => {
             if t.len() != 1 { throw TomlError::new(f"expected a {ctx} variant (a table with one key), found {t.len()} keys"); }
-            let (k, x) = t.iter().next() ?? ("", Value::Bool(false));
+            let (k, x) = t.into_iter().next() ?? ("", Value::Bool(false));
             (k, x)
         },
         _ => throw TomlError::new(f"expected a {ctx} variant, found {v.kind()}"),
