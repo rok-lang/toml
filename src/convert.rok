@@ -305,11 +305,12 @@ impl<T: FromToml, const N: usize> FromToml for [T; N] {
     fn from_toml(v: Value) throws (TomlError) -> [T; N] {
         let xs = try List::<T>::from_toml(v);
         if xs.len() != N { throw TomlError::new(f"expected {N} items, found {xs.len()}"); }
-        // The array is seeded with its first item: `[T; 0]` cannot be read.
-        if N == 0 { throw TomlError::new("cannot read a zero-length array"); }
-        let out: [T; N] = [xs[0]; N];
-        for i in 1..N { out[i] = xs[i]; }
-        out
+        // Each slot takes the next item: no element is copied.
+        let i = 0;
+        [(); N].map([ref i] |_| {
+            i += 1;
+            xs[i - 1]
+        })
     }
 
     fn from_missing() throws (TomlError) -> [T; N] {

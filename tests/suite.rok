@@ -336,3 +336,24 @@ fn typed_errors() {
     let e5 = typed_err(base.replace("[limits]", "[limitz]"));
     expect(e5 == "7:1: unknown field `limitz` in Config [.limitz]", e5);
 }
+
+// Not Clone: each slot takes its own item.
+#[derive(Toml, PartialEq, Debug)]
+struct Pt { x: i64; y: i64; }
+
+#[derive(Toml, PartialEq, Debug)]
+struct Fixed { pts: [Pt; 2]; empty: [i64; 0]; }
+
+fn fixed_err(s: str) -> str {
+    try pkg::from_str::<Fixed>(s) catch e { return f"{e}"; };
+    "ok"
+}
+
+#[test]
+fn fixed_arrays() {
+    let f: Fixed = try pkg::from_str("pts = [{ x = 1, y = 2 }, { x = 3, y = 4 }]\nempty = []\n") catch e { panic(f"{e}"); };
+    expect(f.pts[0] == Pt { x: 1, y: 2 } && f.pts[1] == Pt { x: 3, y: 4 }, f"{f:?}");
+    expect(f.empty.len() == 0, "empty");
+    let e = fixed_err("pts = [{ x = 1, y = 2 }]\nempty = []\n");
+    expect(e.contains("expected 2 items, found 1"), e);
+}
