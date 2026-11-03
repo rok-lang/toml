@@ -1,6 +1,6 @@
 // TOML 1.1.0. `parse` reads a document into a `Value` table,
 // `to_str` writes one, and `ToToml` / `FromToml` (with
-// `#[derive(Toml)]`) map rok types to and from `Value`, as std's `rokon`
+// `#[derive(Toml)]`) map Rok types to and from `Value`, as std's `rokon`
 // does for ROKON.
 //
 // Decode errors carry a `path` (`.servers[1].port`); `from_str` turns it
@@ -177,13 +177,13 @@ impl Debug for TomlError {
 
 impl Error for TomlError {}
 
-/// A rok value as TOML. `none` (from `T | none`) leaves the key out;
+/// A Rok value as TOML. `none` (from `T | none`) leaves the key out;
 /// TOML has no null.
 pub trait ToToml {
     fn to_toml(self) -> Value | none;
 }
 
-/// A rok value from TOML; the target type decides how `v` reads.
+/// A Rok value from TOML; the target type decides how `v` reads.
 pub trait FromToml {
     fn from_toml(v: Value) throws (TomlError) -> Self;
 
