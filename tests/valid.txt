@@ -1,6 +1,6 @@
 # toml-test (https://github.com/toml-lang/toml-test, commit ff49d109861c1ad25af53f687f2aef19ab650600), the TOML 1.0.0 and 1.1.0 lists.
 # Copyright (c) 2018 TOML authors, MIT License.
-# One case per line: <name> <versions: 10, 11 or 10,11> <TOML as hex> <expected value, canonical form (tests.rok)>.
+# One case per line: <name> <versions: 10, 11 or 10,11> <TOML as hex> <expected value, canonical form (suite.rok)>.
 array/array-subtables 10,11 5b5b6172725d5d0a5b6172722e7375627461625d0a76616c3d310a0a5b5b6172725d5d0a5b6172722e7375627461625d0a76616c3d320a {"arr":[{"subtab":{"val":integer:1}},{"subtab":{"val":integer:2}}]}
 array/array 10,11 696e7473203d205b312c20322c20332c205d0a666c6f617473203d205b312e312c20322e312c20332e315d0a737472696e6773203d205b2261222c202262222c202263225d0a6461746573203d205b0a09313938372d30372d30355431373a34353a30305a2c0a09313937392d30352d32375430373a33323a30302c0a09323030362d30362d30312c0a0931313a30303a30302c0a5d0a636f6d6d656e7473203d205b0a202020202020202020312c0a202020202020202020322c202374686973206973206f6b0a5d0a {"comments":[integer:1,integer:2],"dates":[datetime:1987-07-05T17:45:00Z,datetime-local:1979-05-27T07:32:00,date-local:2006-06-01,time-local:11:00:00],"floats":[float:1.1e0,float:2.1e0,float:3.1e0],"ints":[integer:1,integer:2,integer:3],"strings":[string:"a",string:"b",string:"c"]}
 array/bool 10,11 61203d205b747275652c2066616c73655d0a {"a":[bool:true,bool:false]}

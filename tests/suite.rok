@@ -48,8 +48,8 @@ fn parse_bytes(b: List<u8>, v: Version) throws (pkg::TomlError) -> Value {
     try pkg::parse(s, v)
 }
 
-/// `s` quoted as toml-test's expected values are (see the vendoring
-/// header): `"`, `\` and control characters escaped.
+/// `s` quoted as toml-test's expected values are: `"`, `\` and
+/// control characters escaped.
 fn jstr(s: str) -> str {
     let out = StrBuf::new();
     out.push('"');

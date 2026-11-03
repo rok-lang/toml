@@ -263,9 +263,8 @@ pub(pkg) fn mismatch<T>(v: Value) -> TomlError {
 /// The path segment of key `k` (`.k`, `."a b"`).
 pub(pkg) fn seg(k: str) -> str { read::seg(k) }
 
-// derive support (used by `#[derive(Toml)]`): the template's names
-// are checked here, so these are `pub(pkg)`. The `dead_code` lint does
-// not see uses inside the template, hence the `allow`s.
+// Derive support. The template's names resolve here, so these are
+// `pub(pkg)`; `dead_code` misses uses inside the template.
 
 /// `k = x` into `t` unless `x` is `none`.
 pub(pkg) fn put<T: ToToml>(t: Dict<str, Value>, k: str, x: T) {
@@ -323,7 +322,7 @@ pub(pkg) fn unpack(v: Value, ctx: str, n: usize) throws (TomlError) -> List<Valu
 }
 
 /// `v` as a variant of enum `ctx`: `"V"` for a unit variant, else
-/// `{ V = payload }`. (variant name, payload or `none`).
+/// `{ V = payload }`. Yields (variant name, payload or `none`).
 #[allow(dead_code)]
 pub(pkg) fn variant_of(v: Value, ctx: str) throws (TomlError) -> (str, Value | none) {
     match v {
