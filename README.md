@@ -12,6 +12,8 @@ follows std's `rokon` module: `parse` / `to_str` / `from_str` / `to_value` /
 rok add toml
 ```
 
+Needs Rok 0.2 or later; Rok 0.1 is no longer supported and cannot read the stone index.
+
 ## Usage
 
 ```rok
