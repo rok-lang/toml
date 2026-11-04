@@ -12,7 +12,7 @@ fn hex_bytes(h: str) -> List<u8> {
     let out: List<u8> = List::with_capacity(h.len() / 2);
     let i = 0usize;
     while i + 1 < h.len() {
-        let n = Int::parse_radix(h[i:i + 2], 16u32) ?? Int::from(0);
+        let n = (try? Int::parse_radix(h[i:i + 2], 16u32)) ?? Int::from(0);
         out.push((n.to_i64() ?? 0) as u8);
         i += 2;
     }
@@ -48,8 +48,8 @@ fn parse_bytes(b: List<u8>, v: Version) throws (pkg::TomlError) -> Value {
     try pkg::parse(s, v)
 }
 
-/// `s` quoted as toml-test's expected values are (see the vendoring
-/// header): `"`, `\` and control characters escaped.
+/// `s` quoted as toml-test's expected values are: `"`, `\` and
+/// control characters escaped.
 fn jstr(s: str) -> str {
     let out = StrBuf::new();
     out.push('"');
@@ -118,7 +118,7 @@ fn run_valid(v: Version) {
         }
         let good = true;
         for w in [Version::V1_0, Version::V1_1] {
-            let text = val.to_string(Options { version: w, width: 40 });
+            let text = val.to_str(Options { version: w, width: 40 });
             let back = try pkg::parse(text, w) catch e {
                 bad.push(f"{c.name}: {w:?} output does not read back ({e}):\n{text}");
                 good = false;
@@ -208,12 +208,12 @@ fn datetimes() {
 fn layout() {
     let src = "title = \"x\"\n\n[owner]\nname = \"Tom\"\n\n[db.ports]\nhttp = 80\n\n[[products]]\nname = \"a\"\n\n[[products]]\nname = \"b\"\nsku = [1, 2]\n\n[products.meta]\nok = true\n";
     let v = try pkg::parse(src) catch e { panic(f"{e}"); };
-    expect(v.to_string() == src, v.to_string());
+    expect(v.to_str() == src, v.to_str());
     let long = "xs = [\n    \"" + "a".repeat(60) + "\",\n    \"" + "b".repeat(60) + "\",\n]\n";
     let v2 = try pkg::parse(long) catch e { panic(f"{e}"); };
-    expect(v2.to_string() == long, v2.to_string());
+    expect(v2.to_str() == long, v2.to_str());
     let odd = try pkg::parse("\"a b\" = { c = [1.0, inf, -0.0], \"d.e\" = 'q\"' }") catch e { panic(f"{e}"); };
-    expect(odd.to_string() == "[\"a b\"]\nc = [1.0, inf, -0.0]\n\"d.e\" = \"q\\\"\"\n", odd.to_string());
+    expect(odd.to_str() == "[\"a b\"]\nc = [1.0, inf, -0.0]\n\"d.e\" = \"q\\\"\"\n", odd.to_str());
 }
 
 #[test]
@@ -224,7 +224,7 @@ fn toml_1_1() {
     expect(f"{v.get("t")?.as_datetime() ?? panic("t")}" == "07:32:00", "time without seconds");
     expect(f"{v.get("d")?.as_datetime() ?? panic("d")}" == "1979-05-27T07:32:00Z", "date-time without seconds");
     // The writer keeps to TOML 1.0: seconds written, inline tables on one line.
-    expect(v.to_string() == "s = \"Jos\u{e9} \\u001B[0m\"\nt = 07:32:00\nd = 1979-05-27T07:32:00Z\n\n[inline]\na = 1\n\n[inline.b]\nc = 2\n", v.to_string());
+    expect(v.to_str() == "s = \"Jos\u{e9} \\u001B[0m\"\nt = 07:32:00\nd = 1979-05-27T07:32:00Z\n\n[inline]\na = 1\n\n[inline.b]\nc = 2\n", v.to_str());
     expect(err_of("x = 07:32.5") != "ok", "a fraction needs seconds");
     expect(err_of("x = { a = 1,, }") != "ok", "double comma");
     expect(err_of("x = { , }") != "ok", "lone comma");
@@ -234,10 +234,10 @@ fn toml_1_1() {
 fn writer_versions() {
     let src = "s = \"\\e[1m\\x01\"\nt = 07:32:00\nu = 07:32:01\nd = 1979-05-27T07:32:00.5Z\npts = [\"origin\", { name = \"alpha\", x = 1, y = 2 }]\n";
     let v = try pkg::parse(src) catch e { panic(f"{e}"); };
-    let v10 = v.to_string(Options { width: 40 });
+    let v10 = v.to_str(Options { width: 40 });
     let want10 = "s = \"\\u001B[1m\\u0001\"\nt = 07:32:00\nu = 07:32:01\nd = 1979-05-27T07:32:00.5Z\npts = [\n    \"origin\",\n    { name = \"alpha\", x = 1, y = 2 },\n]\n";
     expect(v10 == want10, v10);
-    let v11 = v.to_string(Options { version: Version::V1_1, width: 30 });
+    let v11 = v.to_str(Options { version: Version::V1_1, width: 30 });
     let want11 = "s = \"\\e[1m\\x01\"\nt = 07:32\nu = 07:32:01\nd = 1979-05-27T07:32:00.5Z\npts = [\n    \"origin\",\n    {\n        name = \"alpha\",\n        x = 1,\n        y = 2,\n    },\n]\n";
     expect(v11 == want11, v11);
     expect((try pkg::parse(v11) catch e { panic(f"{e}"); }) == v, "1.1 output reads back");
@@ -271,7 +271,7 @@ struct Config {
     started: Datetime;
     day: Date;
     servers: List<Server>;
-    limits: OrderedDict<str, i64>;
+    limits: Dict<str, i64>;
     modes: List<Mode>;
     ids: Dict<u32, str>;
     ratio: f32;
@@ -310,7 +310,7 @@ fn typed_round_trip() {
     expect(c.ids[7u32] == "seven", "int keys");
     expect(c.ratio == 0.1f32, "f32");
     expect(f"{c.started}" == "2024-01-02T03:04:05Z", "datetime");
-    let text = pkg::to_string(c);
+    let text = pkg::to_str(c);
     let back: Config = try pkg::from_str(text) catch e { panic(f"{e}:\n{text}"); };
     expect(back == c, "round trip");
     expect(text.contains("ratio = 0.1\n"), text);
@@ -318,7 +318,7 @@ fn typed_round_trip() {
 }
 
 fn typed_err(s: str) -> str {
-    try pkg::from_str::<Config>(s) catch e { return f"{e} [{e.path}]"; };
+    try pkg::from_str::<Config>(s) catch e { return f"{e} [{e.path()}]"; };
     "ok"
 }
 
@@ -335,4 +335,25 @@ fn typed_errors() {
     expect(e4 == "3:7: expected a local date, found time-local [.day]", e4);
     let e5 = typed_err(base.replace("[limits]", "[limitz]"));
     expect(e5 == "7:1: unknown field `limitz` in Config [.limitz]", e5);
+}
+
+// Not Clone: each slot takes its own item.
+#[derive(Toml, PartialEq, Debug)]
+struct Pt { x: i64; y: i64; }
+
+#[derive(Toml, PartialEq, Debug)]
+struct Fixed { pts: [Pt; 2]; empty: [i64; 0]; }
+
+fn fixed_err(s: str) -> str {
+    try pkg::from_str::<Fixed>(s) catch e { return f"{e}"; };
+    "ok"
+}
+
+#[test]
+fn fixed_arrays() {
+    let f: Fixed = try pkg::from_str("pts = [{ x = 1, y = 2 }, { x = 3, y = 4 }]\nempty = []\n") catch e { panic(f"{e}"); };
+    expect(f.pts[0] == Pt { x: 1, y: 2 } && f.pts[1] == Pt { x: 3, y: 4 }, f"{f:?}");
+    expect(f.empty.len() == 0, "empty");
+    let e = fixed_err("pts = [{ x = 1, y = 2 }]\nempty = []\n");
+    expect(e.contains("expected 2 items, found 1"), e);
 }

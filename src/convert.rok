@@ -1,5 +1,4 @@
-// ToToml / FromToml for the built-in types and collections. The Value
-// model, the public API and the derive-support helpers are in lib.rok.
+// ToToml / FromToml for the built-in types and collections.
 
 use pkg::*;
 
@@ -259,7 +258,7 @@ fn items_of<T>(v: Value) throws (TomlError) -> List<Value> {
 impl<T: ToToml> ToToml for List<T> {
     fn to_toml(self) -> Value | none {
         let out: List<Value> = List::with_capacity(self.len());
-        for x in self { out.push(item(x)); }
+        for x in self { out.push(to_value(x)); }
         Value::Array(out)
     }
 }
@@ -270,7 +269,7 @@ impl<T: FromToml> FromToml for List<T> {
         let out: List<T> = List::with_capacity(xs.len());
         let i = 0usize;
         for x in xs {
-            out.push(try decode::<T>(x, f"[{i}]"));
+            out.push(try from_value_at::<T>(x, f"[{i}]"));
             i += 1;
         }
         out
@@ -280,7 +279,7 @@ impl<T: FromToml> FromToml for List<T> {
 impl<T: ToToml + Hash> ToToml for Set<T> {
     fn to_toml(self) -> Value | none {
         let out: List<Value> = List::with_capacity(self.len());
-        for x in self { out.push(item(x)); }
+        for x in self { out.push(to_value(x)); }
         Value::Array(out)
     }
 }
@@ -293,26 +292,10 @@ impl<T: FromToml + Hash> FromToml for Set<T> {
     }
 }
 
-impl<T: ToToml + Hash> ToToml for OrderedSet<T> {
-    fn to_toml(self) -> Value | none {
-        let out: List<Value> = List::with_capacity(self.len());
-        for x in self { out.push(item(x)); }
-        Value::Array(out)
-    }
-}
-
-impl<T: FromToml + Hash> FromToml for OrderedSet<T> {
-    fn from_toml(v: Value) throws (TomlError) -> OrderedSet<T> {
-        let out: OrderedSet<T> = OrderedSet::new();
-        for x in try List::<T>::from_toml(v) { out.insert(x); }
-        out
-    }
-}
-
 impl<T: ToToml, const N: usize> ToToml for [T; N] {
     fn to_toml(self) -> Value | none {
         let out: List<Value> = List::with_capacity(N);
-        for i in 0..N { out.push(item(self[i])); }
+        for i in 0..N { out.push(to_value(self[i])); }
         Value::Array(out)
     }
 }
@@ -321,11 +304,12 @@ impl<T: FromToml, const N: usize> FromToml for [T; N] {
     fn from_toml(v: Value) throws (TomlError) -> [T; N] {
         let xs = try List::<T>::from_toml(v);
         if xs.len() != N { throw TomlError::new(f"expected {N} items, found {xs.len()}"); }
-        // The array is seeded with its first item: `[T; 0]` cannot be read.
-        if N == 0 { throw TomlError::new("cannot read a zero-length array"); }
-        let out: [T; N] = [xs[0]; N];
-        for i in 1..N { out[i] = xs[i]; }
-        out
+        // Each slot takes the next item: no element is copied.
+        let i = 0;
+        [(); N].map([ref i] |_| {
+            i += 1;
+            xs[i - 1]
+        })
     }
 
     fn from_missing() throws (TomlError) -> [T; N] {
@@ -346,7 +330,7 @@ fn key_text(k: Value) -> str {
 /// Key `k` as a `K`: as a string, else as the integer it spells.
 fn key_of<K: FromToml>(k: str) throws (TomlError) -> K {
     try K::from_toml(Value::Str(k)) catch e {
-        if let n: int = Int::parse_radix(k, 10u32) {
+        if let n: int = try? Int::parse_radix(k, 10u32) {
             if let m: i64 = n.to_i64() {
                 return try K::from_toml(Value::Int(m)) catch _ { throw e.within(seg(k)).at_key(); };
             }
@@ -355,7 +339,7 @@ fn key_of<K: FromToml>(k: str) throws (TomlError) -> K {
     }
 }
 
-fn entries_of<T>(v: Value) throws (TomlError) -> OrderedDict<str, Value> {
+fn entries_of<T>(v: Value) throws (TomlError) -> Dict<str, Value> {
     match v {
         Value::Table(t) => t,
         _ => throw mismatch::<T>(v),
@@ -366,8 +350,8 @@ fn entries_of<T>(v: Value) throws (TomlError) -> OrderedDict<str, Value> {
 /// values are left out.
 impl<K: ToToml + Hash, V: ToToml> ToToml for Dict<K, V> {
     fn to_toml(self) -> Value | none {
-        let out: OrderedDict<str, Value> = OrderedDict::new();
-        for (k, v) in self.entries() { put(out, key_text(item(k)), v); }
+        let out: Dict<str, Value> = Dict::new();
+        for (k, v) in self { put(out, key_text(to_value(k)), v); }
         Value::Table(out)
     }
 }
@@ -375,26 +359,8 @@ impl<K: ToToml + Hash, V: ToToml> ToToml for Dict<K, V> {
 impl<K: FromToml + Hash, V: FromToml> FromToml for Dict<K, V> {
     fn from_toml(v: Value) throws (TomlError) -> Dict<K, V> {
         let out: Dict<K, V> = Dict::new();
-        for (k, x) in (try entries_of::<Dict<K, V>>(v)).entries() {
-            out.insert(try key_of::<K>(k), try decode::<V>(x, seg(k)));
-        }
-        out
-    }
-}
-
-impl<K: ToToml + Hash, V: ToToml> ToToml for OrderedDict<K, V> {
-    fn to_toml(self) -> Value | none {
-        let out: OrderedDict<str, Value> = OrderedDict::new();
-        for (k, v) in self.entries() { put(out, key_text(item(k)), v); }
-        Value::Table(out)
-    }
-}
-
-impl<K: FromToml + Hash, V: FromToml> FromToml for OrderedDict<K, V> {
-    fn from_toml(v: Value) throws (TomlError) -> OrderedDict<K, V> {
-        let out: OrderedDict<K, V> = OrderedDict::new();
-        for (k, x) in (try entries_of::<OrderedDict<K, V>>(v)).entries() {
-            out.insert(try key_of::<K>(k), try decode::<V>(x, seg(k)));
+        for (k, x) in try entries_of::<Dict<K, V>>(v) {
+            out.insert(try key_of::<K>(k), try from_value_at::<V>(x, seg(k)));
         }
         out
     }
@@ -408,56 +374,56 @@ fn tuple_of<T>(v: Value, n: usize) throws (TomlError) -> List<Value> {
 
 // Tuples as arrays, up to 6 elements.
 impl<A: ToToml> ToToml for (A,) {
-    fn to_toml(self) -> Value | none { Value::Array([item(self.0)]) }
+    fn to_toml(self) -> Value | none { Value::Array([to_value(self.0)]) }
 }
 impl<A: FromToml> FromToml for (A,) {
     fn from_toml(v: Value) throws (TomlError) -> (A,) {
         let xs = try tuple_of::<(A,)>(v, 1);
-        (try decode::<A>(xs[0], "[0]"),)
+        (try from_value_at::<A>(xs[0], "[0]"),)
     }
 }
 impl<A: ToToml, B: ToToml> ToToml for (A, B) {
-    fn to_toml(self) -> Value | none { Value::Array([item(self.0), item(self.1)]) }
+    fn to_toml(self) -> Value | none { Value::Array([to_value(self.0), to_value(self.1)]) }
 }
 impl<A: FromToml, B: FromToml> FromToml for (A, B) {
     fn from_toml(v: Value) throws (TomlError) -> (A, B) {
         let xs = try tuple_of::<(A, B)>(v, 2);
-        (try decode::<A>(xs[0], "[0]"), try decode::<B>(xs[1], "[1]"))
+        (try from_value_at::<A>(xs[0], "[0]"), try from_value_at::<B>(xs[1], "[1]"))
     }
 }
 impl<A: ToToml, B: ToToml, C: ToToml> ToToml for (A, B, C) {
-    fn to_toml(self) -> Value | none { Value::Array([item(self.0), item(self.1), item(self.2)]) }
+    fn to_toml(self) -> Value | none { Value::Array([to_value(self.0), to_value(self.1), to_value(self.2)]) }
 }
 impl<A: FromToml, B: FromToml, C: FromToml> FromToml for (A, B, C) {
     fn from_toml(v: Value) throws (TomlError) -> (A, B, C) {
         let xs = try tuple_of::<(A, B, C)>(v, 3);
-        (try decode::<A>(xs[0], "[0]"), try decode::<B>(xs[1], "[1]"), try decode::<C>(xs[2], "[2]"))
+        (try from_value_at::<A>(xs[0], "[0]"), try from_value_at::<B>(xs[1], "[1]"), try from_value_at::<C>(xs[2], "[2]"))
     }
 }
 impl<A: ToToml, B: ToToml, C: ToToml, D: ToToml> ToToml for (A, B, C, D) {
-    fn to_toml(self) -> Value | none { Value::Array([item(self.0), item(self.1), item(self.2), item(self.3)]) }
+    fn to_toml(self) -> Value | none { Value::Array([to_value(self.0), to_value(self.1), to_value(self.2), to_value(self.3)]) }
 }
 impl<A: FromToml, B: FromToml, C: FromToml, D: FromToml> FromToml for (A, B, C, D) {
     fn from_toml(v: Value) throws (TomlError) -> (A, B, C, D) {
         let xs = try tuple_of::<(A, B, C, D)>(v, 4);
-        (try decode::<A>(xs[0], "[0]"), try decode::<B>(xs[1], "[1]"), try decode::<C>(xs[2], "[2]"), try decode::<D>(xs[3], "[3]"))
+        (try from_value_at::<A>(xs[0], "[0]"), try from_value_at::<B>(xs[1], "[1]"), try from_value_at::<C>(xs[2], "[2]"), try from_value_at::<D>(xs[3], "[3]"))
     }
 }
 impl<A: ToToml, B: ToToml, C: ToToml, D: ToToml, E: ToToml> ToToml for (A, B, C, D, E) {
-    fn to_toml(self) -> Value | none { Value::Array([item(self.0), item(self.1), item(self.2), item(self.3), item(self.4)]) }
+    fn to_toml(self) -> Value | none { Value::Array([to_value(self.0), to_value(self.1), to_value(self.2), to_value(self.3), to_value(self.4)]) }
 }
 impl<A: FromToml, B: FromToml, C: FromToml, D: FromToml, E: FromToml> FromToml for (A, B, C, D, E) {
     fn from_toml(v: Value) throws (TomlError) -> (A, B, C, D, E) {
         let xs = try tuple_of::<(A, B, C, D, E)>(v, 5);
-        (try decode::<A>(xs[0], "[0]"), try decode::<B>(xs[1], "[1]"), try decode::<C>(xs[2], "[2]"), try decode::<D>(xs[3], "[3]"), try decode::<E>(xs[4], "[4]"))
+        (try from_value_at::<A>(xs[0], "[0]"), try from_value_at::<B>(xs[1], "[1]"), try from_value_at::<C>(xs[2], "[2]"), try from_value_at::<D>(xs[3], "[3]"), try from_value_at::<E>(xs[4], "[4]"))
     }
 }
 impl<A: ToToml, B: ToToml, C: ToToml, D: ToToml, E: ToToml, F: ToToml> ToToml for (A, B, C, D, E, F) {
-    fn to_toml(self) -> Value | none { Value::Array([item(self.0), item(self.1), item(self.2), item(self.3), item(self.4), item(self.5)]) }
+    fn to_toml(self) -> Value | none { Value::Array([to_value(self.0), to_value(self.1), to_value(self.2), to_value(self.3), to_value(self.4), to_value(self.5)]) }
 }
 impl<A: FromToml, B: FromToml, C: FromToml, D: FromToml, E: FromToml, F: FromToml> FromToml for (A, B, C, D, E, F) {
     fn from_toml(v: Value) throws (TomlError) -> (A, B, C, D, E, F) {
         let xs = try tuple_of::<(A, B, C, D, E, F)>(v, 6);
-        (try decode::<A>(xs[0], "[0]"), try decode::<B>(xs[1], "[1]"), try decode::<C>(xs[2], "[2]"), try decode::<D>(xs[3], "[3]"), try decode::<E>(xs[4], "[4]"), try decode::<F>(xs[5], "[5]"))
+        (try from_value_at::<A>(xs[0], "[0]"), try from_value_at::<B>(xs[1], "[1]"), try from_value_at::<C>(xs[2], "[2]"), try from_value_at::<D>(xs[3], "[3]"), try from_value_at::<E>(xs[4], "[4]"), try from_value_at::<F>(xs[5], "[5]"))
     }
 }
